@@ -229,8 +229,25 @@ for (v in names(na_counts)) {
 if (all(na_counts == 0)) cat("  No missing values.\n")
 cat("  Total rows before drop_na:", nrow(model_panel), "\n")
 
-model_panel <- model_panel %>% drop_na()
+model_panel <- model_panel %>% drop_na() %>% droplevels()
 cat("  Total rows after  drop_na:", nrow(model_panel), "\n")
+
+# ---- Check factor levels ----------------------------------------------------
+
+cat("\n--- Factor levels after drop_na ---\n")
+factor_vars <- c("employment_type", "education_level", "age_group", "sex", "nuts_region")
+usable_factors <- character(0)
+
+for (v in factor_vars) {
+  nlev <- nlevels(model_panel[[v]])
+  cat(sprintf("  %-20s %d levels: %s\n", v, nlev,
+              paste(levels(model_panel[[v]]), collapse = ", ")))
+  if (nlev >= 2) {
+    usable_factors <- c(usable_factors, v)
+  } else {
+    cat("    ** WARNING: only", nlev, "level — will be excluded from regression **\n")
+  }
+}
 
 # ---- Data verification ------------------------------------------------------
 
@@ -274,7 +291,7 @@ summary_stats <- model_panel %>%
     dependency_ratio_sd   = sd(dependency_ratio, na.rm = TRUE),
     mean_age_group      = NA_real_,
     prop_female         = mean(sex == "Female", na.rm = TRUE),
-    prop_primary_edu    = mean(education_level == "Primary", na.rm = TRUE),
+    prop_primary_edu    = mean(education_level == "Primary or below", na.rm = TRUE),
     prop_secondary_edu  = mean(education_level == "Secondary", na.rm = TRUE),
     prop_tertiary_edu   = mean(education_level == "Tertiary", na.rm = TRUE),
     .groups = "drop"
@@ -297,16 +314,28 @@ cat("Panel dimensions: N =", pdim(pdata)$nT$n, " T =", pdim(pdata)$nT$T,
     " total obs =", pdim(pdata)$nT$N, "\n")
 cat("Balanced panel:", ifelse(pdim(pdata)$balanced, "Yes", "No"), "\n\n")
 
+# ---- Build formulas dynamically (exclude single-level factors) ---------------
+
+# RE formula: includes all usable factors + year
+re_factor_terms <- paste0("factor(", usable_factors, ")")
+re_rhs <- paste(c("informality", "dependency_ratio", re_factor_terms, "factor(year)"),
+                collapse = " + ")
+
+# FE formula: only time-varying variables (sex, education, age_group, nuts_region
+# are time-invariant and drop automatically in FE, but we keep only usable ones)
+fe_time_varying <- intersect(c("employment_type"), usable_factors)
+fe_factor_terms <- if (length(fe_time_varying) > 0) paste0("factor(", fe_time_varying, ")") else character(0)
+fe_rhs <- paste(c("informality", "dependency_ratio", fe_factor_terms, "factor(year)"),
+                collapse = " + ")
+
 # ============================================================================
 # TASK 2: MODEL 1 – RANDOM EFFECTS (PRIMARY MODEL)
 # ============================================================================
 
 cat("=", " TASK 2: RANDOM EFFECTS MODEL ", "=", "\n")
 
-re_formula <- poverty_status ~ informality + dependency_ratio +
-  factor(employment_type) + factor(education_level) +
-  factor(age_group) + factor(sex) +
-  factor(nuts_region) + factor(year)
+re_formula <- as.formula(paste("poverty_status ~", re_rhs))
+cat("RE formula:", deparse(re_formula), "\n")
 
 model_re <- plm(
   re_formula,
@@ -346,8 +375,8 @@ if (rho_re > 0.3) {
 cat("\n=", " TASK 3: FIXED EFFECTS MODEL ", "=", "\n")
 
 # Time-invariant variables (sex, education, age_group, nuts_region) drop automatically.
-fe_formula <- poverty_status ~ informality + dependency_ratio +
-  factor(employment_type) + factor(year)
+fe_formula <- as.formula(paste("poverty_status ~", fe_rhs))
+cat("FE formula:", deparse(fe_formula), "\n")
 
 model_fe <- plm(
   fe_formula,
@@ -437,11 +466,11 @@ model_panel_mundlak <- model_panel %>%
 
 pdata_mundlak <- pdata.frame(model_panel_mundlak, index = c("id", "year"), drop.index = FALSE)
 
-mundlak_formula <- poverty_status ~ informality + dependency_ratio +
-  factor(employment_type) + factor(education_level) +
-  factor(age_group) + factor(sex) +
-  factor(nuts_region) + factor(year) +
-  avg_informality + avg_dependency_ratio + avg_employment_type
+mundlak_rhs <- paste(c(re_rhs,
+                       "avg_informality", "avg_dependency_ratio", "avg_employment_type"),
+                     collapse = " + ")
+mundlak_formula <- as.formula(paste("poverty_status ~", mundlak_rhs))
+cat("Mundlak formula:", deparse(mundlak_formula), "\n")
 
 model_mundlak <- plm(
   mundlak_formula,
@@ -505,8 +534,7 @@ cat("\n=", " TASK 5: HAUSMAN TEST ", "=", "\n")
 # Re-estimate both models on the same (reduced) formula for valid comparison.
 # The Hausman test requires that both models use the same specification for
 # the variables that appear in both.
-hausman_formula <- poverty_status ~ informality + dependency_ratio +
-  factor(employment_type) + factor(year)
+hausman_formula <- as.formula(paste("poverty_status ~", fe_rhs))
 
 model_re_hausman <- plm(hausman_formula, data = pdata, model = "random",
                         effect = "individual", random.method = "swar")
