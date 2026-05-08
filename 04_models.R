@@ -66,8 +66,9 @@ dir.create(project$model_dir, showWarnings = FALSE, recursive = TRUE)
 # ---- NUTS-2 → 7 geographic regions mapping ----------------------------------
 # Turkey has 26 NUTS-2 (İBBS Düzey-2) regions; we collapse them into the
 # traditional 7 geographic regions for the regression specification.
+# The mapping supports both string codes ("TR10") and numeric codes (10).
 
-nuts2_to_region <- c(
+nuts2_to_region_str <- c(
   "TR10" = "Marmara",    "TR21" = "Marmara",    "TR22" = "Marmara",
   "TR41" = "Marmara",    "TR42" = "Marmara",
   "TR31" = "Ege",        "TR32" = "Ege",        "TR33" = "Ege",
@@ -81,6 +82,38 @@ nuts2_to_region <- c(
   "TRC1" = "Guneydogu Anadolu", "TRC2" = "Guneydogu Anadolu",
   "TRC3" = "Guneydogu Anadolu"
 )
+
+map_nuts2_to_region <- function(x) {
+  # Convert haven_labelled to plain values
+  x_plain <- if (inherits(x, "haven_labelled")) as.character(haven::as_factor(x)) else as.character(x)
+
+  # Try direct lookup (string codes like "TR10")
+  result <- nuts2_to_region_str[x_plain]
+
+  # If mostly unmatched, try with "TR" prefix (numeric codes like "10" or "51")
+  if (mean(is.na(result)) > 0.5) {
+    x_prefixed <- paste0("TR", x_plain)
+    result_prefixed <- nuts2_to_region_str[x_prefixed]
+    if (mean(is.na(result_prefixed)) < mean(is.na(result))) {
+      result <- result_prefixed
+    }
+  }
+
+  # If still mostly unmatched, try using Stata value labels directly
+  if (mean(is.na(result)) > 0.5 && inherits(x, "haven_labelled")) {
+    labs <- attr(x, "labels")
+    if (!is.null(labs)) {
+      label_map <- setNames(names(labs), as.character(labs))
+      x_labelled <- label_map[as.character(x)]
+      result_lab <- nuts2_to_region_str[x_labelled]
+      if (mean(is.na(result_lab)) < mean(is.na(result))) {
+        result <- result_lab
+      }
+    }
+  }
+
+  result
+}
 
 # ============================================================================
 # TASK 1: DATA PREPARATION & SUMMARY STATISTICS
@@ -132,42 +165,34 @@ model_panel <- panel_poverty %>%
     # Dependency ratio (+ 0.1 to avoid division by zero)
     dependency_ratio = number_of_dependents / (number_of_earners + 0.1),
 
-    # Employment type
+    # Employment type (matches 01_functions.R classification)
     employment_type = factor(
       case_when(
-        .data[[vars$labour_status]] %in% c(1, 2) ~ "Employee",
-        .data[[vars$labour_status]] %in% c(3, 4) ~ "Self-employed",
-        .data[[vars$labour_status]] == 5          ~ "Unemployed",
-        .data[[vars$labour_status]] == 7          ~ "Retired",
-        .data[[vars$labour_status]] %in% c(6, 8, 9, 10) ~ "Inactive",
+        .data[[vars$labour_status]] %in% c(1, 2)          ~ "Employee",
+        .data[[vars$labour_status]] %in% c(3, 4)          ~ "Self-employed",
+        .data[[vars$labour_status]] == 7                   ~ "Retired",
+        .data[[vars$labour_status]] %in% c(5, 6, 8, 9, 10) ~ "Inactive",
         TRUE ~ NA_character_
       ),
-      levels = c("Employee", "Self-employed", "Unemployed", "Retired", "Inactive")
+      levels = c("Employee", "Self-employed", "Retired", "Inactive")
     ),
 
-    # Education level
+    # Education level (matches 01_functions.R classification)
     education_level = factor(
       case_when(
-        .data[[vars$education]] %in% c(0, 1, 2) ~ "Primary",
+        .data[[vars$education]] %in% c(0, 1, 2) ~ "Primary or below",
         .data[[vars$education]] %in% c(3, 4, 5) ~ "Secondary",
         .data[[vars$education]] %in% c(6, 7, 8) ~ "Tertiary",
         TRUE ~ NA_character_
       ),
-      levels = c("Primary", "Secondary", "Tertiary")
+      levels = c("Primary or below", "Secondary", "Tertiary")
     ),
 
-    # Age group
-    age_group = factor(
-      case_when(
-        .data[[vars$age]] >= 15 & .data[[vars$age]] <= 24 ~ "15-24",
-        .data[[vars$age]] >= 25 & .data[[vars$age]] <= 34 ~ "25-34",
-        .data[[vars$age]] >= 35 & .data[[vars$age]] <= 44 ~ "35-44",
-        .data[[vars$age]] >= 45 & .data[[vars$age]] <= 54 ~ "45-54",
-        .data[[vars$age]] >= 55 & .data[[vars$age]] <= 64 ~ "55-64",
-        .data[[vars$age]] >= 65                            ~ "65+",
-        TRUE ~ NA_character_
-      ),
-      levels = c("15-24", "25-34", "35-44", "45-54", "55-64", "65+")
+    # Age group (matches 01_functions.R classification)
+    age_group = cut(
+      .data[[vars$age]],
+      breaks = c(-Inf, 17, 24, 34, 44, 54, 64, Inf),
+      labels = c("0-17", "18-24", "25-34", "35-44", "45-54", "55-64", "65+")
     ),
 
     # Sex: 1 = female, 0 = male
@@ -180,18 +205,32 @@ model_panel <- panel_poverty %>%
       levels = c("Male", "Female")
     ),
 
-    # NUTS-2 → 7 geographic regions
-    nuts2_code   = as.character(.data[[vars$nuts2]]),
+    # NUTS-2 → 7 geographic regions (handles both string and numeric codes)
     nuts_region  = factor(
-      nuts2_to_region[nuts2_code],
+      map_nuts2_to_region(.data[[vars$nuts2]]),
       levels = c("Marmara", "Ege", "Akdeniz", "Ic Anadolu",
                  "Karadeniz", "Dogu Anadolu", "Guneydogu Anadolu")
     )
   ) %>%
   select(id, year, poverty_status, informality, dependency_ratio,
          number_of_dependents, number_of_earners,
-         employment_type, education_level, age_group, sex, nuts_region) %>%
-  drop_na()
+         employment_type, education_level, age_group, sex, nuts_region)
+
+# ---- Diagnose missing values before dropping --------------------------------
+
+cat("\n--- Missing values per variable (before drop_na) ---\n")
+na_counts <- colSums(is.na(model_panel))
+for (v in names(na_counts)) {
+  if (na_counts[v] > 0) {
+    cat(sprintf("  %-25s %d NAs (%.1f%%)\n", v, na_counts[v],
+                100 * na_counts[v] / nrow(model_panel)))
+  }
+}
+if (all(na_counts == 0)) cat("  No missing values.\n")
+cat("  Total rows before drop_na:", nrow(model_panel), "\n")
+
+model_panel <- model_panel %>% drop_na()
+cat("  Total rows after  drop_na:", nrow(model_panel), "\n")
 
 # ---- Data verification ------------------------------------------------------
 
@@ -522,9 +561,9 @@ if (requireNamespace("stargazer", quietly = TRUE)) {
     covariate.labels = c(
       "Informality (not registered)",
       "Dependency Ratio",
-      "Self-employed", "Unemployed", "Retired", "Inactive",
+      "Self-employed", "Retired", "Inactive",
       "Secondary education", "Tertiary education",
-      "25-34", "35-44", "45-54", "55-64", "65+",
+      "18-24", "25-34", "35-44", "45-54", "55-64", "65+",
       "Female",
       "Ege", "Akdeniz", "Ic Anadolu", "Karadeniz",
       "Dogu Anadolu", "Guneydogu Anadolu",
@@ -558,9 +597,9 @@ if (requireNamespace("stargazer", quietly = TRUE)) {
     covariate.labels = c(
       "Informality (not registered)",
       "Dependency Ratio",
-      "Self-employed", "Unemployed", "Retired", "Inactive",
+      "Self-employed", "Retired", "Inactive",
       "Secondary education", "Tertiary education",
-      "25-34", "35-44", "45-54", "55-64", "65+",
+      "18-24", "25-34", "35-44", "45-54", "55-64", "65+",
       "Female",
       "Ege", "Akdeniz", "Ic Anadolu", "Karadeniz",
       "Dogu Anadolu", "Guneydogu Anadolu",
@@ -595,12 +634,12 @@ if (requireNamespace("stargazer", quietly = TRUE)) {
     covariate.labels = c(
       "Informality (not registered)",
       "Dependency Ratio",
-      "Self-employed", "Unemployed", "Retired", "Inactive",
+      "Self-employed", "Retired", "Inactive",
       "Secondary education", "Tertiary education",
-      "25-34", "35-44", "45-54", "55-64", "65+",
+      "18-24", "25-34", "35-44", "45-54", "55-64", "65+",
       "Female",
-      "Ege", "Akdeniz", "\\Ic{} Anadolu", "Karadeniz",
-      "Do\\u{g}u Anadolu", "G\\\"uneydogu Anadolu",
+      "Ege", "Akdeniz", "Ic Anadolu", "Karadeniz",
+      "Dogu Anadolu", "Guneydogu Anadolu",
       "2017", "2018", "2019",
       "Avg Informality (Mundlak)", "Avg Dependency Ratio (Mundlak)",
       "Avg Employment Type (Mundlak)"

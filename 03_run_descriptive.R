@@ -229,7 +229,17 @@ profile <- panel_poverty %>%
       levels = c("Registered", "Not registered")
     ),
     # --- NUTS-2 region with labels ---
-    nuts2_code = as.character(.data[[vars$nuts2]]),
+    # Handles both string ("TR10") and numeric (10) codes from Stata
+    nuts2_raw = if (inherits(.data[[vars$nuts2]], "haven_labelled")) {
+      as.character(haven::as_factor(.data[[vars$nuts2]]))
+    } else {
+      as.character(.data[[vars$nuts2]])
+    },
+    nuts2_code = ifelse(
+      nuts2_raw %in% names(nuts2_labels),
+      nuts2_raw,
+      paste0("TR", nuts2_raw)
+    ),
     nuts2_labelled = factor(
       ifelse(
         nuts2_code %in% names(nuts2_labels),
