@@ -80,6 +80,13 @@ Sys.setenv(
 cat("Step 1: reading raw SILC panel data\n")
 raw <- read_dta(project$data_path)
 
+# 02 dosyasında Step 1 kısmını buna çevir:
+panel_audit <- calculate_attrition_rate(raw, vars, project$panel_years, project$reference_year)
+
+# Artık bunlar çalışacaktır:
+cat("Attrition rate:", panel_audit$attrition_rate_percent, "%\n")
+write_csv(panel_audit$baseline_comparison, file.path(project$out_dir, "attrition_comparison.csv"))
+
 cat("Step 2: constructing balanced panel and propagating longitudinal weights\n")
 panel_balanced <- construct_balanced_panel(
   raw = raw,
@@ -110,8 +117,7 @@ panel_poverty <- add_poverty_status(
   panel = panel_income,
   poverty_lines = poverty_lines,
   vars = vars,
-  thresholds = project$thresholds
-)
+  thresholds = project$thresholds)
 
 cat("Step 5: classifying poverty spells and Eurostat persistent poverty\n")
 classified_main <- classify_poverty_spells(
@@ -119,8 +125,7 @@ classified_main <- classify_poverty_spells(
   vars = vars,
   panel_years = project$panel_years,
   reference_year = project$reference_year,
-  threshold = project$main_threshold
-)
+  threshold = project$main_threshold)
 
 classified_all <- purrr::map_dfr(project$thresholds, function(threshold) {
   classify_poverty_spells(
@@ -128,8 +133,7 @@ classified_all <- purrr::map_dfr(project$thresholds, function(threshold) {
     vars = vars,
     panel_years = project$panel_years,
     reference_year = project$reference_year,
-    threshold = threshold
-  ) %>%
+    threshold = threshold) %>%
     select(all_of(vars$person_id), all_of(vars$longitudinal_weight), threshold,
            n_poor_4yr, n_poor_previous3, current_poor, persistent_poor, poverty_group)
 })
@@ -152,8 +156,7 @@ duration_outputs <- make_poverty_duration_table(
   classified = classified_main,
   vars = vars,
   panel_years = project$panel_years,
-  threshold = project$main_threshold
-)
+  threshold = project$main_threshold)
 
 table3_duration <- duration_outputs$duration
 table3_episode_summary <- duration_outputs$episodes %>%
@@ -169,29 +172,47 @@ table4_profile <- make_profile_table(
   vars = vars,
   codes = codes,
   reference_year = project$reference_year,
-  threshold = project$main_threshold
-)
+  threshold = project$main_threshold)
+
+# 1. Formal çalışanlar için matris
+table5_formal <- make_transition_matrices(
+  panel = panel_poverty,
+  vars = vars,
+  panel_years = project$panel_years,
+  threshold = project$main_threshold,
+  filter_expr = "informal_status == 0" 
+) %>% mutate(group = "Formal")
+
+# 2. Informal çalışanlar için matris
+table5_informal <- make_transition_matrices(
+  panel = panel_poverty,
+  vars = vars,
+  panel_years = project$panel_years,
+  threshold = project$main_threshold,
+  filter_expr = "informal_status == 1"
+) %>% mutate(group = "Informal")
+
+# 3. İkisini birleştir
+table5_comparison <- bind_rows(table5_formal, table5_informal)
+
+# İstatistiksel Test (Chi-Square): 
+# Formal ve informal gruplar arasında yoksulluktan çıkış (Exit) veya giriş (Entry) 
+# oranları farklı mı?
+test_data <- table5_comparison %>%
+  filter(transition_type == "Exit") # Örnek: Yoksulluktan çıkış oranları farkı
+
+# Not: Geçiş oranları arasındaki farkın testi genellikle 'prop.test' veya 
+# survey paketindeki 'svychisq' ile panel verisi üzerinden yapılır.
 
 table5_transitions <- make_transition_matrices(
   panel = panel_poverty,
   vars = vars,
   panel_years = project$panel_years,
-  threshold = project$main_threshold
-)
+  threshold = project$main_threshold)
 
 mobility_summary <- table5_transitions %>%
   filter(transition_type %in% c("Entry", "Exit", "Poverty persistence")) %>%
   select(transition, transition_type, from_status, to_status, weighted_n, row_probability)
-
-cat("Step 7: estimating weighted probit model for 2019 poverty risk\n")
-probit <- fit_probit_model(
-  panel = panel_poverty,
-  classified = classified_main,
-  vars = vars,
-  codes = codes,
-  reference_year = project$reference_year,
-  threshold = project$main_threshold
-)
 
 cat("Step 8: exporting tables, model outputs, and figure\n")
 write_csv(panel_audit, file.path(project$out_dir, "panel_audit.csv"))
@@ -207,9 +228,6 @@ write_csv(table3_episode_summary, file.path(project$table_dir, "table3_episode_s
 write_csv(table4_profile, file.path(project$table_dir, "table4_sociodemographic_profile.csv"))
 write_csv(table5_transitions, file.path(project$table_dir, "table5_transition_matrices.csv"))
 write_csv(mobility_summary, file.path(project$table_dir, "transition_mobility_summary.csv"))
-write_csv(probit$coefficients, file.path(project$model_dir, "probit_coefficients_robust.csv"))
-write_csv(probit$marginal_effects, file.path(project$model_dir, "probit_average_marginal_effects.csv"))
-write_csv(probit$diagnostics, file.path(project$model_dir, "probit_diagnostics.csv"))
 
 if (requireNamespace("gt", quietly = TRUE)) {
   gt_theme <- function(x) {
@@ -333,44 +351,7 @@ if (requireNamespace("gt", quietly = TRUE)) {
       gt::fmt_number(columns = weighted_n, decimals = 0, use_seps = TRUE) %>%
       gt::fmt_percent(columns = row_probability, decimals = 1) %>%
       gt_theme()
-  save_gt(table5_gt, "table5_transition_matrices")
-
-  probit_gt <- probit$coefficients %>%
-    select(term, estimate, robust_se, robust_z, robust_p, conf_low, conf_high) %>%
-    gt::gt() %>%
-    gt::tab_header(
-      title = gt::md("**Probit model. Poverty risk in 2019**"),
-      subtitle = "Weighted probit model with heteroskedasticity-robust standard errors."
-    ) %>%
-    gt::cols_label(
-      term = "Variable",
-      estimate = "Coefficient",
-      robust_se = "Robust SE",
-      robust_z = "z",
-      robust_p = "p-value",
-      conf_low = "95% CI low",
-      conf_high = "95% CI high"
-    ) %>%
-    gt::fmt_number(columns = c(estimate, robust_se, robust_z, conf_low, conf_high), decimals = 3) %>%
-    gt::fmt_number(columns = robust_p, decimals = 4) %>%
-    gt_theme()
-  gt::gtsave(probit_gt, file.path(project$model_dir, "probit_coefficients_robust.tex"))
-  gt::gtsave(probit_gt, file.path(project$model_dir, "probit_coefficients_robust.html"))
-
-  if (!("note" %in% names(probit$marginal_effects))) {
-    ame_gt <- probit$marginal_effects %>%
-      select(any_of(c("term", "contrast", "estimate", "std.error", "statistic", "p.value", "conf.low", "conf.high"))) %>%
-      gt::gt() %>%
-      gt::tab_header(
-        title = gt::md("**Average marginal effects from probit model**"),
-        subtitle = "Probability-scale effects; robust variance-covariance matrix."
-      ) %>%
-      gt::fmt_number(columns = where(is.numeric), decimals = 3) %>%
-      gt_theme()
-    gt::gtsave(ame_gt, file.path(project$model_dir, "probit_average_marginal_effects.tex"))
-    gt::gtsave(ame_gt, file.path(project$model_dir, "probit_average_marginal_effects.html"))
-  }
-}
+  save_gt(table5_gt, "table5_transition_matrices") }
 
 poverty_trend <- make_poverty_trend_figure(table1_poverty_rates)
 ggsave(
@@ -378,14 +359,12 @@ ggsave(
   plot = poverty_trend,
   width = 7.2,
   height = 4.6,
-  dpi = 320
-)
+  dpi = 320 )
 ggsave(
   filename = file.path(project$figure_dir, "figure1_poverty_trends_ci.pdf"),
   plot = poverty_trend,
   width = 7.2,
-  height = 4.6
-)
+  height = 4.6 )
 
 figure1_tex <- c(
   "\\begin{figure}[htbp]",
@@ -406,11 +385,8 @@ latex_snippets <- c(
   "\\input{tables/table3_poverty_duration.tex}",
   "\\input{tables/table4_sociodemographic_profile.tex}",
   "\\input{tables/table5_transition_matrices.tex}",
-  "\\input{models/probit_coefficients_robust.tex}",
-  "\\input{models/probit_average_marginal_effects.tex}",
   "",
-  "\\input{figures/figure1_poverty_trends_ci.tex}"
-)
+  "\\input{figures/figure1_poverty_trends_ci.tex}" )
 writeLines(latex_snippets, file.path(project_root, "latex_inputs.tex"))
 
 cat("\nCompleted SILC poverty dynamics workflow.\n")
@@ -418,3 +394,4 @@ cat("Individuals in balanced panel:", panel_audit$individuals, "\n")
 cat("Main threshold:", project$main_threshold, "% of annual median equivalised income\n")
 cat("Outputs written to:", normalizePath(project$out_dir), normalizePath(project$table_dir),
     normalizePath(project$figure_dir), normalizePath(project$model_dir), "\n")
+
