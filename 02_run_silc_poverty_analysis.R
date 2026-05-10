@@ -80,12 +80,9 @@ Sys.setenv(
 cat("Step 1: reading raw SILC panel data\n")
 raw <- read_dta(project$data_path)
 
-# 02 dosyasında Step 1 kısmını buna çevir:
-panel_audit <- calculate_attrition_rate(raw, vars, project$panel_years, project$reference_year)
-
-# Artık bunlar çalışacaktır:
-cat("Attrition rate:", panel_audit$attrition_rate_percent, "%\n")
-write_csv(panel_audit$baseline_comparison, file.path(project$out_dir, "attrition_comparison.csv"))
+attrition_results <- calculate_attrition_rate(raw, vars, codes, project$panel_years, project$reference_year)
+cat("Attrition rate:", attrition_results$attrition_rate_percent, "%\n")
+write_csv(attrition_results$attrition_table, file.path(project$table_dir, "attrition_comparison.csv"))
 
 cat("Step 2: constructing balanced panel and propagating longitudinal weights\n")
 panel_balanced <- construct_balanced_panel(
@@ -95,7 +92,7 @@ panel_balanced <- construct_balanced_panel(
   reference_year = project$reference_year
 )
 
-panel_audit <- panel_balanced %>%
+panel_balance_check <- panel_balanced %>%
   summarise(
     individuals = n_distinct(.data[[vars$person_id]]),
     person_years = n(),
@@ -108,7 +105,8 @@ panel_audit <- panel_balanced %>%
 cat("Step 3: calculating modified OECD equivalence scale and equivalised income\n")
 panel_income <- panel_balanced %>%
   add_equivalised_income(vars) %>%
-  add_household_context(vars, codes)
+  add_household_context(vars, codes) %>%
+  add_employment_stability(vars)
 
 cat("Step 4: computing annual within-sample poverty thresholds\n")
 poverty_lines <- compute_poverty_lines(panel_income, vars, project$thresholds)
@@ -174,35 +172,21 @@ table4_profile <- make_profile_table(
   reference_year = project$reference_year,
   threshold = project$main_threshold)
 
-# 1. Formal çalışanlar için matris
 table5_formal <- make_transition_matrices(
-  panel = panel_poverty,
-  vars = vars,
+  panel = panel_poverty, vars = vars,
   panel_years = project$panel_years,
   threshold = project$main_threshold,
-  filter_expr = "informal_status == 0" 
+  filter_expr = "informal_status == 0L"
 ) %>% mutate(group = "Formal")
 
-# 2. Informal çalışanlar için matris
 table5_informal <- make_transition_matrices(
-  panel = panel_poverty,
-  vars = vars,
+  panel = panel_poverty, vars = vars,
   panel_years = project$panel_years,
   threshold = project$main_threshold,
-  filter_expr = "informal_status == 1"
+  filter_expr = "informal_status == 1L"
 ) %>% mutate(group = "Informal")
 
-# 3. İkisini birleştir
 table5_comparison <- bind_rows(table5_formal, table5_informal)
-
-# İstatistiksel Test (Chi-Square): 
-# Formal ve informal gruplar arasında yoksulluktan çıkış (Exit) veya giriş (Entry) 
-# oranları farklı mı?
-test_data <- table5_comparison %>%
-  filter(transition_type == "Exit") # Örnek: Yoksulluktan çıkış oranları farkı
-
-# Not: Geçiş oranları arasındaki farkın testi genellikle 'prop.test' veya 
-# survey paketindeki 'svychisq' ile panel verisi üzerinden yapılır.
 
 table5_transitions <- make_transition_matrices(
   panel = panel_poverty,
@@ -215,7 +199,8 @@ mobility_summary <- table5_transitions %>%
   select(transition, transition_type, from_status, to_status, weighted_n, row_probability)
 
 cat("Step 8: exporting tables, model outputs, and figure\n")
-write_csv(panel_audit, file.path(project$out_dir, "panel_audit.csv"))
+write_csv(panel_balance_check, file.path(project$out_dir, "panel_audit.csv"))
+write_csv(table5_comparison, file.path(project$table_dir, "table5_formal_informal_transitions.csv"))
 write_csv(poverty_lines, file.path(project$out_dir, "poverty_lines.csv"))
 write_csv(panel_poverty, file.path(project$out_dir, "analysis_panel_2016_2019.csv"))
 write_csv(classified_main, file.path(project$out_dir, "poverty_typology_60_2019_anchor.csv"))
@@ -351,7 +336,45 @@ if (requireNamespace("gt", quietly = TRUE)) {
       gt::fmt_number(columns = weighted_n, decimals = 0, use_seps = TRUE) %>%
       gt::fmt_percent(columns = row_probability, decimals = 1) %>%
       gt_theme()
-  save_gt(table5_gt, "table5_transition_matrices") }
+  save_gt(table5_gt, "table5_transition_matrices")
+
+  # Attrition comparison table (publication-ready)
+  attrition_gt <- attrition_results$attrition_table %>%
+    gt::gt() %>%
+    gt::tab_header(
+      title = gt::md("**Attrition Analysis: Stayers vs. Attritors (Baseline Year)**"),
+      subtitle = gt::md(paste0(
+        "Weighted means/proportions. Stayers = individuals in balanced panel (all 4 waves). ",
+        "Retention rate: ", sprintf("%.1f%%", attrition_results$retention_rate_percent),
+        ". Attrition rate: ", sprintf("%.1f%%", attrition_results$attrition_rate_percent), "."))
+    ) %>%
+    gt::cols_label(
+      Characteristic = "",
+      Stayer = gt::md("**Stayer**"),
+      Attritor = gt::md("**Attritor**"),
+      Difference = gt::md("**Difference**"),
+      p_value = gt::md("**p-value**")
+    ) %>%
+    gt::tab_source_note(
+      source_note = gt::md("Survey-weighted t-tests. Significance: \\*\\*\\* p<0.01, \\*\\* p<0.05, \\* p<0.10.")
+    ) %>%
+    gt::cols_align(align = "left", columns = Characteristic) %>%
+    gt::cols_align(align = "right", columns = c(Stayer, Attritor, Difference, p_value)) %>%
+    gt_theme()
+  save_gt(attrition_gt, "attrition_comparison")
+
+  # Formal vs informal transition comparison
+  table5_comp_gt <- table5_comparison %>%
+    gt::gt(groupname_col = "group") %>%
+    gt::tab_header(
+      title = gt::md("**Poverty Transitions by Employment Formality**"),
+      subtitle = "Weighted row probabilities; 60% poverty threshold."
+    ) %>%
+    gt::fmt_number(columns = weighted_n, decimals = 0, use_seps = TRUE) %>%
+    gt::fmt_percent(columns = row_probability, decimals = 1) %>%
+    gt_theme()
+  save_gt(table5_comp_gt, "table5_formal_informal_transitions")
+}
 
 poverty_trend <- make_poverty_trend_figure(table1_poverty_rates)
 ggsave(
@@ -390,7 +413,7 @@ latex_snippets <- c(
 writeLines(latex_snippets, file.path(project_root, "latex_inputs.tex"))
 
 cat("\nCompleted SILC poverty dynamics workflow.\n")
-cat("Individuals in balanced panel:", panel_audit$individuals, "\n")
+cat("Individuals in balanced panel:", panel_balance_check$individuals, "\n")
 cat("Main threshold:", project$main_threshold, "% of annual median equivalised income\n")
 cat("Outputs written to:", normalizePath(project$out_dir), normalizePath(project$table_dir),
     normalizePath(project$figure_dir), normalizePath(project$model_dir), "\n")

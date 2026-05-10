@@ -71,36 +71,11 @@ weighted_median <- function(x, w) {
 # =============================================================================
 #  Calculate attrition rate and compare baseline characteristics
 # =============================================================================
-calculate_attrition_rate <- function(raw, vars, panel_years, reference_year) {
-  #' Calculate attrition rate and summarize retention by wave
-  #'
-  #' @param raw Raw panel data from read_dta()
-  #' @param vars Variable names list from config
-  #' @param panel_years Vector of years in panel (e.g., 2016:2019)
-  #' @param reference_year Final year of panel (e.g., 2019)
-  #'
-  #' @return List containing:
-  #'   - attrition_by_wave: Data frame of yearly sample sizes
-  #'   - overall_attrition: Single number (percent attrition 2016→reference_year)
-  #'   - cohort_analysis: Distribution of stayers vs. attritors
-  #'
-  #' @details
-  #' The function calculates:
-  #' 1. Count of individuals observed in each year
-  #' 2. Balanced panel count (all years)
-  #' 3. Attrition rate = 1 - (balanced_panel / first_year_sample)
-  #'
-  #' Example output:
-  #'   Initial (2016):    63,000,000 individuals
-  #'   Balanced (2016-19): 15,000,000 individuals  
-  #'   Retention: 23.8%
-  #'   Attrition: 76.2%
-  
+calculate_attrition_rate <- function(raw, vars, codes, panel_years, reference_year) {
   year_var <- vars$year
-  id_var <- vars$person_id
+  id_var   <- vars$person_id
   weight_var <- vars$longitudinal_weight
-  
-  # Step 1: Count individuals observed in each year
+
   by_year <- raw %>%
     group_by(.data[[year_var]]) %>%
     summarise(
@@ -109,50 +84,111 @@ calculate_attrition_rate <- function(raw, vars, panel_years, reference_year) {
       .groups = "drop"
     ) %>%
     arrange(.data[[year_var]])
-  
-  # Step 2: Identify balanced panel (individuals in ALL years)
+
   balanced_ids <- raw %>%
     group_by(.data[[id_var]]) %>%
     filter(n_distinct(.data[[year_var]]) == length(panel_years)) %>%
     distinct(.data[[id_var]]) %>%
     pull(.data[[id_var]])
-  
-  n_balanced_unweighted <- length(balanced_ids)
-  n_first_year <- by_year %>% filter(.data[[year_var]] == min(panel_years)) %>% pull(n_individuals_unweighted)
-  
-  attrition_rate <- 1 - (n_balanced_unweighted / n_first_year)
-  retention_rate <- 1 - attrition_rate
-  
-  # Step 3: Compare characteristics of stayers vs. attritors (baseline year)
-  baseline_year <- min(panel_years)
-  baseline_data <- raw %>% filter(.data[[year_var]] == baseline_year)
-  
-  baseline_data <- baseline_data %>%
-    mutate(stayer = .data[[id_var]] %in% balanced_ids)
-  
-  # Summary stats by attrition status
-  attrition_comparison <- baseline_data %>%
-    group_by(stayer) %>%
-    summarise(
-      n = n_distinct(.data[[id_var]]),
-      weighted_pop = sum(.data[[weight_var]], na.rm = TRUE),
-      mean_age = weighted.mean(.data[[vars$age]], .data[[weight_var]], na.rm = TRUE),
-      mean_income = weighted.mean(.data[[vars$household_income]], .data[[weight_var]], na.rm = TRUE),
-      .groups = "drop"
-    ) %>%
+
+  n_balanced <- length(balanced_ids)
+  n_first    <- by_year %>%
+    filter(.data[[year_var]] == min(panel_years)) %>%
+    pull(n_individuals_unweighted)
+  attrition_rate <- 1 - (n_balanced / n_first)
+
+  # --- Expanded baseline comparison (first wave) ---
+  baseline <- raw %>%
+    filter(.data[[year_var]] == min(panel_years)) %>%
     mutate(
-      status = if_else(stayer, "Stayer (balanced panel)", "Attritor (dropped)")
-    ) %>%
-    select(status, everything(), -stayer)
-  
-  # Return results
+      stayer = .data[[id_var]] %in% balanced_ids,
+      stayer_label = if_else(stayer, "Stayer", "Attritor"),
+      female = if_else(.data[[vars$sex]] == codes$sex[["female"]], 1L, 0L, missing = NA_integer_),
+      informal = if_else(
+        .data[[vars$social_security]] %in% codes$likely_informal_social_security_values,
+        1L, 0L, missing = 0L),
+      edu_primary = if_else(.data[[vars$education]] %in% c(0, 1, 2), 1L, 0L, missing = NA_integer_),
+      edu_secondary = if_else(.data[[vars$education]] %in% c(3, 4, 5), 1L, 0L, missing = NA_integer_),
+      edu_tertiary = if_else(.data[[vars$education]] %in% c(6, 7, 8), 1L, 0L, missing = NA_integer_),
+      employed = if_else(.data[[vars$labour_status]] %in% codes$employed_labour_status, 1L, 0L, missing = NA_integer_)
+    )
+
+  w <- baseline[[weight_var]]
+  fmt_v <- function(x) sprintf("%.3f", x)
+  fmt_p <- function(p) {
+    p <- as.numeric(p)
+    stars <- add_significance_stars(p)
+    paste0(ifelse(p < 0.001, "<0.001", sprintf("%.3f", p)), stars)
+  }
+
+  # Helper: weighted mean by group
+  wmean_by <- function(var) {
+    baseline %>%
+      filter(!is.na(.data[[var]])) %>%
+      group_by(stayer_label) %>%
+      summarise(m = weighted_mean_safe(.data[[var]], .data[[weight_var]]), .groups = "drop") %>%
+      tidyr::pivot_wider(names_from = stayer_label, values_from = m)
+  }
+
+  # Helper: weighted proportion by group
+  wprop_by <- function(var) {
+    baseline %>%
+      filter(!is.na(.data[[var]])) %>%
+      group_by(stayer_label) %>%
+      summarise(m = weighted_mean_safe(.data[[var]], .data[[weight_var]]), .groups = "drop") %>%
+      tidyr::pivot_wider(names_from = stayer_label, values_from = m)
+  }
+
+  # t-test p-value (survey-weighted)
+  wt_p <- function(var) {
+    df <- baseline %>% filter(!is.na(.data[[var]]))
+    des <- survey::svydesign(ids = ~1, weights = as.formula(paste0("~", weight_var)), data = df)
+    tt <- tryCatch(
+      survey::svyttest(as.formula(paste0(var, " ~ stayer")), design = des),
+      error = function(e) NULL)
+    if (is.null(tt)) return(NA_real_)
+    tt$p.value
+  }
+
+  build_row <- function(label, var) {
+    vals <- wmean_by(var)
+    p <- wt_p(var)
+    tibble(
+      Characteristic = label,
+      Stayer = fmt_v(vals$Stayer),
+      Attritor = fmt_v(vals$Attritor),
+      Difference = fmt_v(vals$Stayer - vals$Attritor),
+      p_value = fmt_p(p)
+    )
+  }
+
+  n_row <- tibble(
+    Characteristic = "N (unweighted)",
+    Stayer = as.character(sum(baseline$stayer)),
+    Attritor = as.character(sum(!baseline$stayer)),
+    Difference = "",
+    p_value = ""
+  )
+
+  attrition_table <- bind_rows(
+    n_row,
+    build_row("Age, mean", vars$age),
+    build_row("Female, proportion", "female"),
+    build_row("Household income, mean", vars$household_income),
+    build_row("Primary or below, proportion", "edu_primary"),
+    build_row("Secondary, proportion", "edu_secondary"),
+    build_row("Tertiary, proportion", "edu_tertiary"),
+    build_row("Employed, proportion", "employed"),
+    build_row("Informal (not registered), proportion", "informal")
+  )
+
   list(
     by_year = by_year,
-    balanced_panel_n = n_balanced_unweighted,
-    first_year_n = n_first_year,
+    balanced_panel_n = n_balanced,
+    first_year_n = n_first,
     attrition_rate_percent = attrition_rate * 100,
-    retention_rate_percent = retention_rate * 100,
-    baseline_comparison = attrition_comparison)
+    retention_rate_percent = (1 - attrition_rate) * 100,
+    attrition_table = attrition_table)
 }
 
 construct_balanced_panel <- function(raw, vars, panel_years, reference_year) {
@@ -234,58 +270,80 @@ add_equivalised_income <- function(panel, vars) {
 }
 
 add_household_context <- function(panel, vars, codes) {
-  id <- vars$person_id
-  hh <- vars$household_id
-  year <- vars$year
-  age <- vars$age
+  id     <- vars$person_id
+  hh     <- vars$household_id
+  year   <- vars$year
+  age    <- vars$age
   labour <- vars$labour_status
+  ss     <- vars$social_security
+  sex_v  <- vars$sex
 
   panel %>%
     mutate(
-      is_child_u14 = .data[[age]] < 14,
-      is_child_u18 = .data[[age]] < 18,
+      is_child_u14      = .data[[age]] < 14,
+      is_child_u18      = .data[[age]] < 18,
       is_elderly_65plus = .data[[age]] >= 65,
-      is_earner_proxy = if_else(.data[[labour]] %in% codes$employed_labour_status, 1L, 0L, missing = 0L)
+      is_adult_14_65    = .data[[age]] >= 14 & .data[[age]] < 65,
+      is_earner_proxy   = if_else(
+        .data[[labour]] %in% codes$employed_labour_status, 1L, 0L, missing = 0L),
+      # Binary person-level variables (0/1)
+      informal_status = if_else(
+        .data[[ss]] %in% codes$likely_informal_social_security_values,
+        1L, 0L, missing = 0L),
+      female = if_else(
+        .data[[sex_v]] == codes$sex[["female"]], 1L, 0L, missing = NA_integer_),
+      is_formal_earner   = if_else(
+        is_earner_proxy == 1L & informal_status == 0L, 1L, 0L),
+      is_informal_earner = if_else(
+        is_earner_proxy == 1L & informal_status == 1L, 1L, 0L)
     ) %>%
     group_by(.data[[hh]], .data[[year]]) %>%
     mutate(
-      hh_size = n_distinct(.data[[id]]),
-      hh_children_u14 = sum(is_child_u14, na.rm = TRUE),
-      hh_children_u18 = sum(is_child_u18, na.rm = TRUE),
-      hh_elderly_65plus = sum(is_elderly_65plus, na.rm = TRUE),
-      hh_earners_proxy = sum(is_earner_proxy, na.rm = TRUE),
-      # ---------------------------------------------------------
-      # STANDARD DEPENDENCY RATIO
-      # (household members not earning / earners)
-      # ---------------------------------------------------------
+      hh_size            = n_distinct(.data[[id]]),
+      hh_children_u14    = sum(is_child_u14, na.rm = TRUE),
+      hh_children_u18    = sum(is_child_u18, na.rm = TRUE),
+      hh_elderly_65plus  = sum(is_elderly_65plus, na.rm = TRUE),
+      hh_earners_proxy   = sum(is_earner_proxy, na.rm = TRUE),
+      hh_formal_earners  = sum(is_formal_earner, na.rm = TRUE),
+      hh_informal_earners = sum(is_informal_earner, na.rm = TRUE),
+      hh_adults_14_65             = sum(is_adult_14_65, na.rm = TRUE),
+      hh_adults_14_65_working     = sum(is_earner_proxy == 1L & is_adult_14_65, na.rm = TRUE),
+      hh_adults_14_65_not_working = hh_adults_14_65 - hh_adults_14_65_working,
+      # Standard dependency ratio
       dependency_ratio = if_else(
         hh_earners_proxy > 0,
-        (hh_size - hh_earners_proxy) / hh_earners_proxy,NA_real_),
-      
-      # ---------------------------------------------------------
-      # OECD-STYLE DEPENDENCY RATIO
-      # weighted demographic burden
-      # ---------------------------------------------------------
+        (hh_size - hh_earners_proxy) / hh_earners_proxy, NA_real_),
+      # Modified (OECD-style) dependency ratio — FIXED
+      # 0.3 × children <14 + 1.0 × adults 14-65 not working + 0.5 × elderly 65+
+      # denominator: adults 14-65 working (not all earners)
       dependency_ratio_oecd = if_else(
-        hh_earners_proxy > 0,
-        
-        (  0.3 * hh_children_u14 +
-            1.0 * (hh_size - hh_earners_proxy - hh_children_u14) +
-            0.5 * hh_elderly_65plus) / hh_earners_proxy,NA_real_ ),
-      
-      # ---------------------------------------------------------
-      # LOG DEPENDENCY RATIO
-      # useful for regressions with skewness
-      # ---------------------------------------------------------
-      log_dependency_ratio = log(dependency_ratio + 0.001),
-      
+        hh_adults_14_65_working > 0,
+        (0.3 * hh_children_u14 +
+         1.0 * hh_adults_14_65_not_working +
+         0.5 * hh_elderly_65plus) / hh_adults_14_65_working,
+        NA_real_),
+      # Log of modified dependency ratio
+      log_dependency_ratio_oecd = log(dependency_ratio_oecd + 0.001),
       household_type_derived = case_when(
         hh_size == 1 ~ "Single person",
         hh_children_u18 > 0 & hh_elderly_65plus > 0 ~ "Children and elderly present",
         hh_children_u18 > 0 ~ "Children present",
         hh_elderly_65plus > 0 ~ "Elderly present",
-        TRUE ~ "Adults only"
-      )
+        TRUE ~ "Adults only")
+    ) %>%
+    ungroup()
+}
+
+add_employment_stability <- function(panel, vars) {
+  id   <- vars$person_id
+  year <- vars$year
+  panel %>%
+    arrange(.data[[id]], .data[[year]]) %>%
+    group_by(.data[[id]]) %>%
+    mutate(
+      hh_earners_lag = lag(hh_earners_proxy, order_by = .data[[year]]),
+      earner_loss = if_else(
+        !is.na(hh_earners_lag) & hh_earners_proxy < hh_earners_lag, 1L, 0L)
     ) %>%
     ungroup()
 }
@@ -535,8 +593,11 @@ make_profile_table <- function(panel, classified, vars, codes, reference_year, t
   weight <- vars$longitudinal_weight
   fmt_n <- function(x) {formatC(round(x), format = "f", digits = 0, big.mark = ",")}
   fmt_pct <- function(x) {ifelse(is.na(x), "", sprintf("%.1f%%", 100 * x))}
-  fmt_p <- function(p) {  p <- as.numeric(p)[1]
-    case_when(is.na(p) ~ "-", p < 0.001 ~ "<0.001", TRUE ~ sprintf("%.3f", p))}
+  fmt_p <- function(p) {
+    p <- as.numeric(p)[1]
+    stars <- add_significance_stars(p)
+    case_when(is.na(p) ~ "-", p < 0.001 ~ paste0("<0.001", stars),
+             TRUE ~ paste0(sprintf("%.3f", p), stars))}
 
   w_sd <- function(x, w) { ok <- !is.na(x) & !is.na(w) & w > 0
     if (sum(ok) < 2) return(NA_real_)
@@ -588,20 +649,21 @@ make_profile_table <- function(panel, classified, vars, codes, reference_year, t
         case_when(
           .data[[vars$education]] %in% c(0, 1, 2) ~ "Primary or below",
           .data[[vars$education]] %in% c(3, 4, 5) ~ "Secondary",
-          .data[[vars$education]] == 6 ~ "Tertiary", TRUE ~ NA_character_),
+          .data[[vars$education]] %in% c(6, 7, 8) ~ "Tertiary",
+          TRUE ~ NA_character_),
         levels = c("Primary or below", "Secondary", "Tertiary")),
       labour_recoded = factor(
         case_when(
-          .data[[vars$labour_status]] %in% c(1, 2) ~ "Employee",
-          .data[[vars$labour_status]] %in% c(3, 4) ~ "Self-employed",
-          .data[[vars$labour_status]] == 5 ~ "Unemployed", 
-          .data[[vars$labour_status]] == 7 ~ "Retired",
-          .data[[vars$labour_status]] %in% c(6, 8, 9, 10) ~ "Inactive",
+          .data[[vars$labour_status]] %in% c(1, 2)          ~ "Employee",
+          .data[[vars$labour_status]] %in% c(3, 4)          ~ "Self-employed",
+          .data[[vars$labour_status]] == 7                   ~ "Retired",
+          .data[[vars$labour_status]] %in% c(5, 6, 8, 9, 10) ~ "Inactive",
           TRUE ~ NA_character_),
-        levels = c("Employee", "Self-employed", "Unemployed", "Retired", "Inactive")
+        levels = c("Employee", "Self-employed", "Retired", "Inactive")
       ),
-      informal_status = if_else(.data[[vars$social_security]] %in% codes$likely_informal_social_security_values, 
-                                "Informal", "Formal", missing = "Formal")
+      informal_status_label = factor(
+        if_else(informal_status == 1L, "Informal", "Formal"),
+        levels = c("Formal", "Informal"))
     )
 
   weighted_chisq_p <- function(var) {
@@ -692,8 +754,10 @@ make_profile_table <- function(panel, classified, vars, codes, reference_year, t
     categorical_rows("Sex", "sex_recoded", levels(profile$sex_recoded)),
     categorical_rows("Education", "education_recoded", levels(profile$education_recoded)),
     categorical_rows("Employment status", "labour_recoded", levels(profile$labour_recoded)),
-    categorical_rows("Social Security Status", "informal_status", c("Formal", "Informal")),
-    continuous_row("Eq. income (TL), mean (SD)", "eq_income") )
+    categorical_rows("Social Security Status", "informal_status_label", c("Formal", "Informal")),
+    continuous_row("Eq. income (TL), mean (SD)", "eq_income"),
+    continuous_row("Dependency ratio, mean (SD)", "dependency_ratio"),
+    continuous_row("Modified dep. ratio (OECD), mean (SD)", "dependency_ratio_oecd") )
 
   attr(out, "headers") <- headers
   out
