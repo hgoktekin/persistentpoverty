@@ -34,9 +34,7 @@ vars <- list(
   sex = "fk090",
   education = "fe030",
   labour_status = "fi010",
-  social_security = "fi020",
-  nuts2 = "hb050"
-)
+  social_security = "fi020")
 
 # Optional recoding choices. These are deliberately conservative and transparent.
 # Verify the value labels in the TurkStat codebook before final publication.
