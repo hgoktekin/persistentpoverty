@@ -700,12 +700,11 @@ fit_probit_model <- function(panel, classified, vars, codes, reference_year, thr
         !is.na(.data[[vars$social_security]]) ~ "Registered/other",
         TRUE ~ NA_character_
       )),
-      region = factor(.data[[vars$nuts2]]),
       household_type = factor(household_type_derived)
     ) %>%
     select(
       poor_current, female, age, age_sq, education, labour_status, informal_proxy,
-      household_type, hh_children_u14, hh_earners_proxy, region, model_weight
+      household_type, hh_children_u14, hh_earners_proxy, model_weight
     ) %>%
     drop_na()
 
@@ -713,7 +712,7 @@ fit_probit_model <- function(panel, classified, vars, codes, reference_year, thr
   # constrains predicted probabilities to [0, 1]. Coefficients are latent-index
   # effects; average marginal effects are the main probability-scale quantities.
   full_formula <- poor_current ~ female + age + age_sq + education + labour_status +
-    informal_proxy + household_type + hh_children_u14 + hh_earners_proxy + region
+    informal_proxy + household_type + hh_children_u14 + hh_earners_proxy 
 
   fallback_formula <- poor_current ~ female + age + age_sq + education + labour_status +
     informal_proxy + household_type + hh_children_u14 + hh_earners_proxy
@@ -730,31 +729,12 @@ fit_probit_model <- function(panel, classified, vars, codes, reference_year, thr
 
   fit <- fit_once(full_formula)
   used_formula <- full_formula
-  model_note <- "Full specification includes NUTS-2 region fixed effects."
-
-  # Full regional specifications can be fragile in short panels when some
-  # regions have sparse cells or near-perfect prediction. If that happens, the
-  # script keeps the analysis reproducible by falling back to the transparent
-  # parsimonious specification and records the reason in the model notes.
-  unstable <- !isTRUE(fit$converged) || any(!is.finite(coef(fit))) ||
-    any(abs(coef(fit)) > 20, na.rm = TRUE)
-
-  if (unstable) {
-    fit <- fit_once(fallback_formula)
-    used_formula <- fallback_formula
-    model_note <- paste(
-      "The full NUTS-2 specification showed non-convergence or separation.",
-      "Reported model omits region fixed effects; estimate regional models",
-      "separately or collapse regions as a robustness check."
-    )
-  }
 
   if (!isTRUE(fit$converged)) {
     warning(
       "Fallback probit still did not converge. Inspect model_data for separation ",
       "or simplify categorical predictors further.",
-      call. = FALSE
-    )
+      call. = FALSE)
   }
 
   robust_vcov <- sandwich::vcovHC(fit, type = "HC1")
