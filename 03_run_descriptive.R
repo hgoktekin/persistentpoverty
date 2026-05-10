@@ -7,15 +7,16 @@
 #     Age group, Sex, Education, Employment status, Social security
 #     registration, and Equivalised income — by poverty typology.
 #
-#   Table 4b  (Section 2 – Household & regional characteristics):
+#   Table 4b  (Section 2 – Household characteristics):
 #     Household size, No. of children under 18, No. of elderly (65+),
-#     No. of earners, and NUTS-2 region (with labels) — by poverty
-#     typology.
+#     No. of earners, formal/informal earners, dependency ratios —
+#     by poverty typology.
 #
 # Both tables report weighted column percentages N (%) for categorical
 # variables, weighted Mean (SD) for continuous variables, and p-values
-# from weighted chi-squared (categorical) or weighted Kruskal–Wallis
-# (continuous) tests across the mutually exclusive four-year typology.
+# (with significance stars) from weighted chi-squared (categorical) or
+# weighted Kruskal–Wallis (continuous) tests across the mutually
+# exclusive four-year typology.
 #
 # Outputs are saved as CSV files and, if the gt package is available, as
 # HTML and LaTeX files.
@@ -69,37 +70,6 @@ project$model_dir  <- file.path(project_root, project$model_dir)
 dir.create(project$out_dir,   showWarnings = FALSE, recursive = TRUE)
 dir.create(project$table_dir, showWarnings = FALSE, recursive = TRUE)
 
-# ---- NUTS-2 region labels (26 İBBS Düzey-2 regions) ------------------------
-
-nuts2_labels <- c(
-  "TR10" = "İstanbul",
-  "TR21" = "Tekirdağ, Edirne, Kırklareli",
-  "TR22" = "Balıkesir, Çanakkale",
-  "TR31" = "İzmir",
-  "TR32" = "Aydın, Denizli, Muğla",
-  "TR33" = "Manisa, Afyonkarahisar, Kütahya, Uşak",
-  "TR41" = "Bursa, Eskişehir, Bilecik",
-  "TR42" = "Kocaeli, Sakarya, Düzce, Bolu, Yalova",
-  "TR51" = "Ankara",
-  "TR52" = "Konya, Karaman",
-  "TR61" = "Antalya, Isparta, Burdur",
-  "TR62" = "Adana, Mersin",
-  "TR63" = "Hatay, Kahramanmaraş, Osmaniye",
-  "TR71" = "Kırıkkale, Aksaray, Niğde, Nevşehir, Kırşehir",
-  "TR72" = "Kayseri, Sivas, Yozgat",
-  "TR81" = "Zonguldak, Karabük, Bartın",
-  "TR82" = "Kastamonu, Çankırı, Sinop",
-  "TR83" = "Samsun, Tokat, Çorum, Amasya",
-  "TR90" = "Trabzon, Ordu, Giresun, Rize, Artvin, Gümüşhane",
-  "TRA1" = "Erzurum, Erzincan, Bayburt",
-  "TRA2" = "Ağrı, Kars, Iğdır, Ardahan",
-  "TRB1" = "Malatya, Elazığ, Bingöl, Tunceli",
-  "TRB2" = "Van, Muş, Bitlis, Hakkari",
-  "TRC1" = "Gaziantep, Adıyaman, Kilis",
-  "TRC2" = "Şanlıurfa, Diyarbakır",
-  "TRC3" = "Mardin, Batman, Şırnak, Siirt"
-)
-
 # ---- Read data and run the main pipeline ------------------------------------
 
 cat("Reading raw SILC panel data ...\n")
@@ -115,7 +85,8 @@ panel_balanced <- construct_balanced_panel(
 cat("Computing equivalised income and household context ...\n")
 panel_income <- panel_balanced %>%
   add_equivalised_income(vars) %>%
-  add_household_context(vars, codes)
+  add_household_context(vars, codes) %>%
+  add_employment_stability(vars)
 
 cat("Adding poverty status ...\n")
 poverty_lines <- compute_poverty_lines(panel_income, vars, project$thresholds)
@@ -136,7 +107,9 @@ fmt_n   <- function(x) formatC(round(x), format = "f", digits = 0, big.mark = ",
 fmt_pct <- function(x) ifelse(is.na(x), "", sprintf("%.1f%%", 100 * x))
 fmt_p   <- function(p) {
   p <- as.numeric(p)[1]
-  case_when(is.na(p) ~ "-", p < 0.001 ~ "<0.001", TRUE ~ sprintf("%.3f", p))
+  stars <- add_significance_stars(p)
+  case_when(is.na(p) ~ "-", p < 0.001 ~ paste0("<0.001", stars),
+            TRUE ~ paste0(sprintf("%.3f", p), stars))
 }
 
 w_sd <- function(x, w) {
@@ -220,32 +193,8 @@ profile <- panel_poverty %>%
       levels = c("Employee", "Self-employed", "Retired", "Inactive")
     ),
     social_security_recoded = factor(
-      case_when(
-        .data[[vars$social_security]] %in% codes$likely_informal_social_security_values
-          ~ "Not registered",
-        !is.na(.data[[vars$social_security]]) ~ "Registered",
-        TRUE ~ NA_character_
-      ),
+      if_else(informal_status == 1L, "Not registered", "Registered"),
       levels = c("Registered", "Not registered")
-    ),
-    # --- NUTS-2 region with labels ---
-    # Handles both string ("TR10") and numeric (10) codes from Stata
-    nuts2_raw = if (inherits(.data[[vars$nuts2]], "haven_labelled")) {
-      as.character(haven::as_factor(.data[[vars$nuts2]]))
-    } else {
-      as.character(.data[[vars$nuts2]])
-    },
-    nuts2_code = ifelse(
-      nuts2_raw %in% names(nuts2_labels),
-      nuts2_raw,
-      paste0("TR", nuts2_raw)
-    ),
-    nuts2_labelled = factor(
-      ifelse(
-        nuts2_code %in% names(nuts2_labels),
-        paste0(nuts2_code, " - ", nuts2_labels[nuts2_code]),
-        nuts2_code
-      )
     )
   )
 
@@ -356,21 +305,20 @@ table4a <- bind_rows(
 attr(table4a, "headers") <- headers
 
 # =============================================================================
-# TABLE 4b — Section 2: Household & regional characteristics
+# TABLE 4b — Section 2: Household characteristics
 # =============================================================================
 
-cat("Building Table 4b (household & regional characteristics) ...\n")
+cat("Building Table 4b (household characteristics) ...\n")
 
 table4b <- bind_rows(
-  continuous_row("Household size, mean (SD)",            "hh_size"),
-  continuous_row("No. children under 18, mean (SD)",     "hh_children_u18"),
-  continuous_row("No. elderly (65+), mean (SD)",         "hh_elderly_65plus"),
-  continuous_row("No. earners (proxy), mean (SD)",       "hh_earners_proxy"),
-  categorical_rows(
-    "NUTS-2 region",
-    "nuts2_labelled",
-    sort(levels(profile$nuts2_labelled))
-  )
+  continuous_row("Household size, mean (SD)",                  "hh_size"),
+  continuous_row("No. children under 18, mean (SD)",           "hh_children_u18"),
+  continuous_row("No. elderly (65+), mean (SD)",               "hh_elderly_65plus"),
+  continuous_row("No. earners (proxy), mean (SD)",             "hh_earners_proxy"),
+  continuous_row("No. formal earners, mean (SD)",              "hh_formal_earners"),
+  continuous_row("No. informal earners, mean (SD)",            "hh_informal_earners"),
+  continuous_row("Dependency ratio, mean (SD)",                "dependency_ratio"),
+  continuous_row("Modified dep. ratio (OECD), mean (SD)",      "dependency_ratio_oecd")
 )
 
 attr(table4b, "headers") <- headers
@@ -378,11 +326,11 @@ attr(table4b, "headers") <- headers
 # ---- Save CSV outputs -------------------------------------------------------
 
 write_csv(table4a, file.path(project$table_dir, "table4a_individual_profile.csv"))
-write_csv(table4b, file.path(project$table_dir, "table4b_household_regional_profile.csv"))
+write_csv(table4b, file.path(project$table_dir, "table4b_household_profile.csv"))
 
 cat("CSV tables saved to:", normalizePath(project$table_dir), "\n")
 
-# ---- Optional: gt formatted tables -----------------------------------------
+# ---- gt formatted tables (HTML + LaTeX) -------------------------------------
 
 if (requireNamespace("gt", quietly = TRUE)) {
   gt_theme <- function(x) {
@@ -410,7 +358,7 @@ if (requireNamespace("gt", quietly = TRUE)) {
       gt::cols_hide(columns = row_type) %>%
       gt::cols_label(
         variable        = "",
-        p_value         = gt::md("p-value^1^"),
+        p_value         = gt::md("p-value"),
         overall         = gt::md(headers$label[headers$col == "overall"]),
         never_poor      = gt::md(headers$label[headers$col == "never_poor"]),
         transient_poor  = gt::md(headers$label[headers$col == "transient_poor"]),
@@ -421,11 +369,11 @@ if (requireNamespace("gt", quietly = TRUE)) {
       gt::tab_source_note(
         source_note = gt::md(
           paste0(
-            "^1^ N (%) = unweighted count (weighted column percentage). ",
+            "N (%) = unweighted count (weighted column percentage). ",
             "Mean (SD) = weighted mean (weighted standard deviation). ",
-            "Transient poor = poor in one or two years but not persistently poor. ",
-            "P-values are computed over the mutually exclusive four-year typology: ",
-            "never poor, transient poor, frequently poor, persistent poor."
+            "P-values: weighted chi-squared (categorical); weighted Kruskal-Wallis (continuous). ",
+            "Significance: \\*\\*\\* p<0.01, \\*\\* p<0.05, \\* p<0.10. ",
+            "Source: TR-SILC 2016--2019."
           )
         )
       ) %>%
@@ -468,74 +416,23 @@ if (requireNamespace("gt", quietly = TRUE)) {
       "*Note:* Weighted column percentages shown as N (%). ",
       "Currently poor (2019) = poor in 2019 regardless of spell history. ",
       "Persistent poor is a strict subset of currently poor. ",
-      "Source: TR-SILC 2016–2019."
+      "Source: TR-SILC 2016--2019."
     ),
     headers  = headers
   )
   save_gt(table4a_gt, "table4a_individual_profile")
 
-  # Table 4b – household & regional characteristics (wider for NUTS-2 labels)
-  table4b_gt <- table4b %>%
-    gt::gt() %>%
-    gt::cols_hide(columns = row_type) %>%
-    gt::cols_label(
-      variable        = "",
-      p_value         = gt::md("p-value^1^"),
-      overall         = gt::md(headers$label[headers$col == "overall"]),
-      never_poor      = gt::md(headers$label[headers$col == "never_poor"]),
-      transient_poor  = gt::md(headers$label[headers$col == "transient_poor"]),
-      currently_poor  = gt::md(headers$label[headers$col == "currently_poor"]),
-      persistent_poor = gt::md(headers$label[headers$col == "persistent_poor"])
-    ) %>%
-    gt::tab_header(
-      title    = gt::md("**Table 4b. Household & regional profile by poverty type, 2019**"),
-      subtitle = gt::md(
-        paste0(
-          "*Note:* Weighted column percentages shown as N (%). ",
-          "Mean (SD) = weighted mean (weighted standard deviation). ",
-          "NUTS-2 region labels follow TurkStat İBBS Düzey-2 classification. ",
-          "Source: TR-SILC 2016–2019."
-        )
-      )
-    ) %>%
-    gt::tab_source_note(
-      source_note = gt::md(
-        paste0(
-          "^1^ P-values are computed over the mutually exclusive four-year typology: ",
-          "never poor, transient poor, frequently poor, persistent poor."
-        )
-      )
-    ) %>%
-    gt::tab_style(
-      style     = list(gt::cell_text(weight = "bold")),
-      locations = gt::cells_body(rows = row_type == "section")
-    ) %>%
-    gt::tab_style(
-      style     = gt::cell_borders(sides = "left", color = "#808080", weight = gt::px(1)),
-      locations = list(
-        gt::cells_body(columns = p_value),
-        gt::cells_column_labels(columns = p_value)
-      )
-    ) %>%
-    gt::tab_style(
-      style     = gt::cell_borders(sides = "left", color = "#d9d9d9", weight = gt::px(1)),
-      locations = list(
-        gt::cells_body(columns = currently_poor),
-        gt::cells_column_labels(columns = currently_poor)
-      )
-    ) %>%
-    gt::cols_align(align = "left", columns = everything()) %>%
-    gt::cols_width(
-      variable        ~ gt::px(280),
-      p_value         ~ gt::px(90),
-      overall         ~ gt::px(145),
-      never_poor      ~ gt::px(145),
-      transient_poor  ~ gt::px(145),
-      currently_poor  ~ gt::px(145),
-      persistent_poor ~ gt::px(145)
-    ) %>%
-    gt_theme()
-  save_gt(table4b_gt, "table4b_household_regional_profile")
+  # Table 4b – household characteristics
+  table4b_gt <- format_profile_gt(
+    table4b,
+    title    = "**Table 4b. Household characteristics by poverty type, 2019**",
+    subtitle = paste0(
+      "*Note:* Mean (SD) = weighted mean (weighted standard deviation). ",
+      "Source: TR-SILC 2016--2019."
+    ),
+    headers  = headers
+  )
+  save_gt(table4b_gt, "table4b_household_profile")
 
   cat("gt tables (HTML + LaTeX) saved.\n")
 }
