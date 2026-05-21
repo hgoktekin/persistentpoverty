@@ -325,7 +325,7 @@ print(baseline_comparison)
 
 # ---- 1c. Attrition rates by subgroups --------------------------------------
 
-attrition_rate_by <- function(group_var, group_label, data = baseline_attrition) {
+attrition_rate_by <- function(data, group_var, group_label) {
   data %>%
     filter(!is.na(.data[[group_var]])) %>%
     group_by(group = group_label, category = as.character(.data[[group_var]])) %>%
@@ -339,7 +339,7 @@ attrition_rate_by <- function(group_var, group_label, data = baseline_attrition)
 
 attrition_by_subgroup <- bind_rows(
   # By income decile
-  attrition_rate_by("income_decile", "Income decile"),
+  attrition_rate_by(baseline_attrition, "income_decile", "Income decile"),
   # By baseline poverty status
   baseline_attrition %>%
     mutate(poverty_label = if_else(poor_baseline == 1L, "Poor", "Non-poor")) %>%
@@ -357,7 +357,7 @@ attrition_by_subgroup <- bind_rows(
     mutate(sex_label = if_else(female == 1L, "Female", "Male")) %>%
     attrition_rate_by("sex_label", "Sex"),
   # By age group
-  attrition_rate_by("age_group_bl", "Age group"),
+  attrition_rate_by(baseline_attrition, "age_group_bl", "Age group"),
   # By household size bracket
   baseline_attrition %>%
     mutate(hh_size_bracket = case_when(
