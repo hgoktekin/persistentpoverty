@@ -214,7 +214,11 @@ summary_stats <- model_panel %>%
     hh_informal_earners_mean = mean(hh_informal_earners, na.rm = TRUE),
     .groups = "drop"
   ) %>%
-  mutate(poverty_status = ifelse(poverty_status == 1, "Poor", "Non-poor"))
+  mutate(
+    poverty_status = ifelse(poverty_status == 1, "Poor", "Non-poor"),
+    dep_ratio_oecd_mean = round(dep_ratio_oecd_mean, 2),
+    dep_ratio_oecd_sd   = round(dep_ratio_oecd_sd, 2)
+  )
 
 cat("\n")
 print(as.data.frame(summary_stats), row.names = FALSE)
