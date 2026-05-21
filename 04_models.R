@@ -136,7 +136,7 @@ model_panel <- panel_poverty %>%
   ) %>%
   select(id, year, poverty_status,
          informal_status, female, earner_loss,
-         dependency_ratio_oecd, log_dependency_ratio_oecd,
+         dependency_ratio, dependency_ratio_oecd, log_dependency_ratio_oecd,
          hh_formal_earners, hh_informal_earners,
          employment_type, education_level, age_group)
 
@@ -327,19 +327,15 @@ mundlak_means <- model_panel %>%
   group_by(id) %>%
   summarise(
     avg_informal       = mean(informal_status, na.rm = TRUE),
-    avg_dep_ratio_oecd = mean(dependency_ratio_oecd, na.rm = TRUE),
+    avg_dep_ratio      = mean(dependency_ratio, na.rm = TRUE),
     avg_employment     = mean(employment_numeric, na.rm = TRUE),
-    avg_earner_loss    = mean(earner_loss, na.rm = TRUE),
-    avg_formal_earners = mean(hh_formal_earners, na.rm = TRUE),
-    avg_informal_earners = mean(hh_informal_earners, na.rm = TRUE),
     .groups = "drop"
   )
 
 model_panel_mundlak <- model_panel %>% left_join(mundlak_means, by = "id")
 pdata_mundlak <- pdata.frame(model_panel_mundlak, index = c("id", "year"), drop.index = FALSE)
 
-mundlak_terms <- c("avg_informal", "avg_dep_ratio_oecd", "avg_employment",
-                    "avg_earner_loss", "avg_formal_earners", "avg_informal_earners")
+mundlak_terms <- c("avg_informal", "avg_dep_ratio", "avg_employment")
 mundlak_rhs <- paste(c(re_rhs, mundlak_terms), collapse = " + ")
 mundlak_formula <- as.formula(paste("poverty_status ~", mundlak_rhs))
 cat("Mundlak formula:", deparse(mundlak_formula), "\n")
@@ -441,11 +437,8 @@ if (requireNamespace("stargazer", quietly = TRUE)) {
   # Mundlak terms
   mundlak_labels <- c(
     "Avg. informal (Mundlak)",
-    "Avg. dep. ratio OECD (Mundlak)",
-    "Avg. employment (Mundlak)",
-    "Avg. earner loss (Mundlak)",
-    "Avg. formal earners (Mundlak)",
-    "Avg. informal earners (Mundlak)"
+    "Avg. dep. ratio (Mundlak)",
+    "Avg. employment (Mundlak)"
   )
   sg_labels <- c(sg_labels, mundlak_labels)
 
