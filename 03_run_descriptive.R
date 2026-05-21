@@ -73,7 +73,7 @@ dir.create(project$table_dir, showWarnings = FALSE, recursive = TRUE)
 # ---- Read data and run the main pipeline ------------------------------------
 
 cat("Reading raw SILC panel data ...\n")
-raw <- read_dta(project$data_path)
+raw <- read_dta('/Users/haticegoktekin/Desktop/phd application/lisans tez/panel_16_19.dta')
 
 cat("Constructing balanced panel ...\n")
 panel_balanced <- construct_balanced_panel(
@@ -177,7 +177,7 @@ profile <- panel_poverty %>%
       case_when(
         .data[[vars$education]] %in% c(0, 1, 2) ~ "Primary or below",
         .data[[vars$education]] %in% c(3, 4, 5) ~ "Secondary",
-        .data[[vars$education]] %in% c(6, 7, 8) ~ "Tertiary",
+        .data[[vars$education]] == 6 ~ "Tertiary",
         TRUE ~ NA_character_
       ),
       levels = c("Primary or below", "Secondary", "Tertiary")
@@ -186,11 +186,12 @@ profile <- panel_poverty %>%
       case_when(
         .data[[vars$labour_status]] %in% c(1, 2)          ~ "Employee",
         .data[[vars$labour_status]] %in% c(3, 4)          ~ "Self-employed",
+        .data[[vars$labour_status]] == 5                   ~ "Unemployed",
         .data[[vars$labour_status]] == 7                   ~ "Retired",
-        .data[[vars$labour_status]] %in% c(5, 6, 8, 9, 10) ~ "Inactive",
+        .data[[vars$labour_status]] %in% c(6, 8, 9, 10) ~ "Inactive",
         TRUE ~ NA_character_
       ),
-      levels = c("Employee", "Self-employed", "Retired", "Inactive")
+      levels = c("Employee", "Self-employed","Unemployed", "Retired", "Inactive")
     ),
     social_security_recoded = factor(
       if_else(informal_status == 1L, "Not registered", "Registered"),
@@ -290,13 +291,12 @@ continuous_row <- function(label, var) {
 # =============================================================================
 # TABLE 4a — Section 1: Individual socio-economic characteristics
 # =============================================================================
-
 cat("Building Table 4a (individual characteristics) ...\n")
 
 table4a <- bind_rows(
   categorical_rows("Age group",             "age_group",                levels(profile$age_group)),
   categorical_rows("Sex",                   "sex_recoded",              levels(profile$sex_recoded)),
-  categorical_rows("Education (ISCED)",     "education_recoded",        levels(profile$education_recoded)),
+  categorical_rows("Education",     "education_recoded",        levels(profile$education_recoded)),
   categorical_rows("Employment status",     "labour_recoded",           levels(profile$labour_recoded)),
   categorical_rows("Social security",       "social_security_recoded",  levels(profile$social_security_recoded)),
   continuous_row("Eq. income (TL), mean (SD)", "eq_income")
@@ -315,8 +315,6 @@ table4b <- bind_rows(
   continuous_row("No. children under 18, mean (SD)",           "hh_children_u18"),
   continuous_row("No. elderly (65+), mean (SD)",               "hh_elderly_65plus"),
   continuous_row("No. earners (proxy), mean (SD)",             "hh_earners_proxy"),
-  continuous_row("No. formal earners, mean (SD)",              "hh_formal_earners"),
-  continuous_row("No. informal earners, mean (SD)",            "hh_informal_earners"),
   continuous_row("Dependency ratio, mean (SD)",                "dependency_ratio"),
   continuous_row("Modified dep. ratio (OECD), mean (SD)",      "dependency_ratio_oecd")
 )

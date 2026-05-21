@@ -51,8 +51,8 @@ project_root <- if (is.na(script_path)) {
   normalizePath(file.path(dirname(script_path), ".."), mustWork = TRUE)
 }
 
-source(file.path(project_root, "R", "00_config.R"))
-source(file.path(project_root, "R", "01_functions.R"))
+source(file.path(project_root,  "00_config.R"))
+source(file.path(project_root,  "01_functions.R"))
 
 project$data_path  <- file.path(project_root, project$data_path)
 project$out_dir    <- file.path(project_root, project$out_dir)
@@ -64,7 +64,7 @@ dir.create(project$table_dir, showWarnings = FALSE, recursive = TRUE)
 # ---- Read data and build analysis panel -------------------------------------
 
 cat("Reading raw SILC panel data ...\n")
-raw <- read_dta(project$data_path)
+raw <- read_dta('/Users/haticegoktekin/Desktop/phd application/lisans tez/panel_16_19.dta')
 
 cat("Constructing balanced panel ...\n")
 panel_balanced <- construct_balanced_panel(
@@ -182,7 +182,7 @@ cat("\nBuilding Table B (categorical variables) ...\n")
 categorical_vars <- list(
   list(section = "Sex",                    var = "sex_recoded"),
   list(section = "Age group",              var = "age_group"),
-  list(section = "Education (ISCED)",      var = "education_recoded"),
+  list(section = "Education",      var = "education_recoded"),
   list(section = "Employment status",      var = "labour_recoded"),
   list(section = "Social security",        var = "social_security_recoded"),
   list(section = "Poverty status (60%)",   var = "poverty_status_60")

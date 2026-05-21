@@ -9,7 +9,7 @@
 # - Persistent at-risk-of-poverty: poor in 2019 and poor in at least two of
 #   2016, 2017, and 2018, following the Eurostat longitudinal definition.
 # =============================================================================
-
+#setwd("/Users/haticegoktekin/Desktop/phd application/lisans tez/son denemeler/R")
 suppressPackageStartupMessages({
   library(dplyr)
   library(forcats)
@@ -291,11 +291,7 @@ add_household_context <- function(panel, vars, codes) {
         .data[[ss]] %in% codes$likely_informal_social_security_values,
         1L, 0L, missing = 0L),
       female = if_else(
-        .data[[sex_v]] == codes$sex[["female"]], 1L, 0L, missing = NA_integer_),
-      is_formal_earner   = if_else(
-        is_earner_proxy == 1L & informal_status == 0L, 1L, 0L),
-      is_informal_earner = if_else(
-        is_earner_proxy == 1L & informal_status == 1L, 1L, 0L)
+        .data[[sex_v]] == codes$sex[["female"]], 1L, 0L, missing = NA_integer_)
     ) %>%
     group_by(.data[[hh]], .data[[year]]) %>%
     mutate(
@@ -364,8 +360,7 @@ compute_poverty_lines <- function(panel, vars, thresholds) {
         list(
           poverty_line_50 = ~ .x * 0.50,
           poverty_line_60 = ~ .x * 0.60,
-          poverty_line_70 = ~ .x * 0.70
-        ),
+          poverty_line_70 = ~ .x * 0.70),
         .names = "{.fn}"
       )
     ) %>%
@@ -415,8 +410,8 @@ classify_poverty_spells <- function(panel, vars, panel_years, reference_year, th
       n_poor_previous3 = sum(c_across(all_of(previous_vars)), na.rm = TRUE),
       current_poor = .data[[current_var]] == 1,
       never_poor = n_poor_4yr == 0,
-      poor_once = n_poor_4yr == 1,
-      poor_multiple = n_poor_4yr >= 2,
+      poor_once = n_poor_4yr %in% c(1,2),
+      poor_multiple = n_poor_4yr == 3 & current_poor == 0 , #cant be current poor 
       persistent_poor = current_poor & n_poor_previous3 >= 2,
       current_poor_not_persistent = current_poor & !persistent_poor,
       # Mutually exclusive four-year typology:
@@ -487,26 +482,36 @@ make_table1_poverty_rates <- function(panel, vars, thresholds) {
 
 make_poverty_group_distribution <- function(classified, vars) {
   weight <- vars$longitudinal_weight
+  total_n <- nrow(classified)
   total_w <- sum(classified[[weight]], na.rm = TRUE)
 
   mutual <- classified %>%
-    count(poverty_group, wt = .data[[weight]], name = "weighted_n") %>%
+    count(poverty_group, name = "unweighted_n") %>%
+    left_join(
+      classified %>%
+        count(poverty_group, wt = .data[[weight]], name = "weighted_n"),
+      by = "poverty_group") %>%
     mutate(
       table_family = "Mutually exclusive four-year typology",
-      population_share = weighted_n / total_w
+      unweighted_share = unweighted_n / total_n,
+      weighted_share = weighted_n / total_w
     ) %>%
     rename(category = poverty_group)
 
   overlapping <- tibble(
     table_family = "Overlapping current-year flags",
     category = c("Current poor (2019)", "Persistent poor"),
+    unweighted_n = c(
+      sum(classified$current_poor, na.rm = TRUE),
+      sum(classified$persistent_poor, na.rm = TRUE)),
     weighted_n = c(
       sum(classified[[weight]][classified$current_poor], na.rm = TRUE),
       sum(classified[[weight]][classified$persistent_poor], na.rm = TRUE)
     )
   ) %>%
-    mutate(population_share = weighted_n / total_w)
-
+    mutate(
+      unweighted_share = unweighted_n / total_n,
+      weighted_share = weighted_n / total_w)
   bind_rows(mutual, overlapping)
 }
 
@@ -530,6 +535,7 @@ make_poverty_duration_table <- function(panel, classified, vars, panel_years, th
   year <- vars$year
   weight <- vars$longitudinal_weight
   poor <- paste0("poor_", threshold)
+  total_n <- nrow(classified)
   total_w <- sum(classified[[weight]], na.rm = TRUE)
 
   episodes <- panel %>%
@@ -542,41 +548,66 @@ make_poverty_duration_table <- function(panel, classified, vars, panel_years, th
 
   duration <- classified %>%
     mutate(duration_years = n_poor_4yr) %>%
-    count(duration_years, wt = .data[[weight]], name = "weighted_n") %>%
-    mutate(population_share = weighted_n / total_w)
-
+    count(duration_years, name = "unweighted_n") %>%
+    left_join(
+      classified %>%
+        mutate(duration_years = n_poor_4yr) %>%
+        count(duration_years, wt = .data[[weight]], name = "weighted_n"),
+      by = "duration_years"
+    ) %>%
+    mutate(
+      unweighted_share = unweighted_n / total_n,
+      weighted_share = weighted_n / total_w
+    )
   list(duration = duration, episodes = episodes)}
 
 make_transition_matrices <- function(panel, vars, panel_years, 
-                                     threshold, filter_expr = NULL) {
+                                     threshold, codes = NULL) {
   id <- vars$person_id
   year <- vars$year
   weight <- vars$longitudinal_weight
   poor <- paste0("poor_", threshold)
-
-  # --- KRİTİK EKSİK BURASIYDI: Filtreleme Mantığı ---
-  # Eğer bir filtre ifadesi (string) verilmişse, veriyi önce filtrele
-  df_to_use <- if(!is.null(filter_expr)) {
-    panel %>% filter(!!rlang::parse_expr(filter_expr))
-  } else {  panel }
+  social_security <- vars$social_security
   
-  wide <- df_to_use %>%
-    select(all_of(c(id, year, weight)), all_of(poor)) %>%
-    pivot_wider(names_from = all_of(year), values_from = all_of(poor), names_prefix = "poor_")
-
+  wide <- panel %>%
+    mutate(
+      formal_status = case_when(
+        is.null(codes) | is.null(codes$likely_informal_social_security_values) ~ NA_character_,
+        is.na(.data[[social_security]]) ~ NA_character_,
+        .data[[social_security]] %in% codes$likely_informal_social_security_values ~ "Informal",
+        TRUE ~ "Formal"
+      )
+    ) %>%
+    transmute(
+      !!id := .data[[id]],
+      !!year := .data[[year]],
+      !!weight := .data[[weight]],
+      poor_status = .data[[poor]],
+      formal_status = formal_status
+    ) %>%
+    pivot_wider(
+      names_from = all_of(year),
+      values_from = c(poor_status, formal_status),
+      names_sep = "_"
+    )
+  
   purrr::map_dfr(seq_along(panel_years[-length(panel_years)]), function(i) {
     y0 <- panel_years[i]
     y1 <- panel_years[i + 1]
-    from <- paste0("poor_", y0)
-    to <- paste0("poor_", y1)
-
+    from <- paste0("poor_status_", y0)
+    to <- paste0("poor_status_", y1)
+    status_at_t <- paste0("formal_status_", y0)
+    
+    
     wide %>%
-      filter(!is.na(.data[[from]]), !is.na(.data[[to]])) %>%
+      filter(!is.na(.data[[from]]), !is.na(.data[[to]]), !is.na(.data[[status_at_t]])) %>%
       mutate(
         from_status = if_else(.data[[from]] == 1, "Poor", "Non-poor"),
-        to_status = if_else(.data[[to]] == 1, "Poor", "Non-poor")) %>%
-      count(from_status, to_status, wt = .data[[weight]], name = "weighted_n") %>%
-      group_by(from_status) %>%
+        to_status = if_else(.data[[to]] == 1, "Poor", "Non-poor"),
+        formal_status = .data[[status_at_t]] 
+        ) %>%
+      count(formal_status, from_status, to_status, wt = .data[[weight]], name = "weighted_n") %>%
+      group_by(formal_status, from_status) %>%
       mutate(row_probability = weighted_n / sum(weighted_n)) %>%
       ungroup() %>%
       mutate(
@@ -592,7 +623,10 @@ make_profile_table <- function(panel, classified, vars, codes, reference_year, t
   year <- vars$year
   weight <- vars$longitudinal_weight
   fmt_n <- function(x) {formatC(round(x), format = "f", digits = 0, big.mark = ",")}
-  fmt_pct <- function(x) {ifelse(is.na(x), "", sprintf("%.1f%%", 100 * x))}
+  fmt_num <- function(x) {ifelse(is.na(x), "", 
+                          formatC(x, format = "f", digits = 2, big.mark = ","))}
+  
+  fmt_pct <- function(x) {ifelse(is.na(x), "", sprintf("%.2f%%", 100 * x))}
   fmt_p <- function(p) {
     p <- as.numeric(p)[1]
     stars <- add_significance_stars(p)
@@ -606,13 +640,12 @@ make_profile_table <- function(panel, classified, vars, codes, reference_year, t
 
   cell_n_pct <- function(data, var, level) {
     x <- data[[var]]
-    w <- data[[weight]]
-    ok <- !is.na(x) & !is.na(w) & w > 0
-    denom <- sum(w[ok], na.rm = TRUE)
+    ok <- !is.na(x)
+    denom <- sum(ok, na.rm = TRUE)
     if (denom == 0) return("")
     n <- sum(x[ok] == level, na.rm = TRUE)
-    pct <- sum(w[ok][x[ok] == level], na.rm = TRUE) / denom
-    paste0(fmt_n(n), " (", fmt_pct(pct), ")") }
+    pct <- n / denom
+    paste0(fmt_n(n), " (", fmt_pct(pct), ")")}
 
   cell_mean_sd <- function(data, var) {
     x <- data[[var]]
@@ -631,7 +664,7 @@ make_profile_table <- function(panel, classified, vars, codes, reference_year, t
         n_poor_4yr == 0 ~ "Never poor",
         n_poor_4yr %in% c(1, 2) & !persistent_poor ~ "Transient poor",
         persistent_poor ~ "Persistent poor",
-        TRUE ~ "Frequently poor"),
+        n_poor_4yr == 3 & !persistent_poor ~ "Frequently poor"),
       poverty_group_for_test = factor(
         profile_spell_group,
         levels = c("Never poor", "Transient poor", "Frequently poor", "Persistent poor")),
@@ -649,17 +682,18 @@ make_profile_table <- function(panel, classified, vars, codes, reference_year, t
         case_when(
           .data[[vars$education]] %in% c(0, 1, 2) ~ "Primary or below",
           .data[[vars$education]] %in% c(3, 4, 5) ~ "Secondary",
-          .data[[vars$education]] %in% c(6, 7, 8) ~ "Tertiary",
+          .data[[vars$education]] == 6 ~ "Tertiary",
           TRUE ~ NA_character_),
         levels = c("Primary or below", "Secondary", "Tertiary")),
       labour_recoded = factor(
         case_when(
           .data[[vars$labour_status]] %in% c(1, 2)          ~ "Employee",
           .data[[vars$labour_status]] %in% c(3, 4)          ~ "Self-employed",
+          .data[[vars$labour_status]] == 5                   ~ "Unemployed",
           .data[[vars$labour_status]] == 7                   ~ "Retired",
-          .data[[vars$labour_status]] %in% c(5, 6, 8, 9, 10) ~ "Inactive",
+          .data[[vars$labour_status]] %in% c(6, 8, 9, 10) ~ "Inactive",
           TRUE ~ NA_character_),
-        levels = c("Employee", "Self-employed", "Retired", "Inactive")
+        levels = c("Employee", "Self-employed", "Unemplyoed", "Retired", "Inactive")
       ),
       informal_status_label = factor(
         if_else(informal_status == 1L, "Informal", "Formal"),
@@ -755,12 +789,174 @@ make_profile_table <- function(panel, classified, vars, codes, reference_year, t
     categorical_rows("Education", "education_recoded", levels(profile$education_recoded)),
     categorical_rows("Employment status", "labour_recoded", levels(profile$labour_recoded)),
     categorical_rows("Social Security Status", "informal_status_label", c("Formal", "Informal")),
-    continuous_row("Eq. income (TL), mean (SD)", "eq_income"),
+  
+    categorical_rows("Household type", "household_type_derived", levels(factor(profile$household_type_derived))),
+    continuous_row("Household size, mean (SD); min-max", "hh_size"),
+    continuous_row("Children under 14, mean (SD); min-max", "hh_children_u14"),
+    continuous_row("Earners in household, mean (SD); min-max", "hh_earners_proxy"),
     continuous_row("Dependency ratio, mean (SD)", "dependency_ratio"),
-    continuous_row("Modified dep. ratio (OECD), mean (SD)", "dependency_ratio_oecd") )
+    continuous_row("Modified dep. ratio (OECD), mean (SD)", "dependency_ratio_oecd"),
+  
+    continuous_row("Eq. income (TL), mean (SD)", "eq_income"),
+    continuous_row("Eq. income (TL), mean (SD); min-max", "eq_income"))
+    
 
   attr(out, "headers") <- headers
   out
+}
+
+make_income_composition_table <- function(panel, classified, vars, income_components, reference_year) {
+  id <- vars$person_id
+  year <- vars$year
+  weight <- vars$longitudinal_weight
+  available_components <- intersect(names(income_components), names(panel))
+  
+  if (length(available_components) == 0) {
+    return(tibble(
+      poverty_profile = character(),
+      income_variable = character(),
+      income_type = character(),
+      unweighted_n = integer(),
+      unweighted_positive_n = integer(),
+      mean_income = numeric(),
+      income_share = numeric()
+    ))
+  }
+  
+  component_vars <- setdiff(available_components, "fg140")
+  denominator_var <- if ("fg140" %in% available_components) "fg140" else NA_character_
+  
+  profile <- panel %>%
+    filter(.data[[year]] == reference_year) %>%
+    left_join(
+      classified %>%
+        select(all_of(id), poverty_group, n_poor_4yr, current_poor, persistent_poor),
+      by = id
+    ) %>%
+    mutate(
+      profile_spell_group = case_when(
+        n_poor_4yr == 0 ~ "Never poor",
+        n_poor_4yr %in% c(1, 2) & !persistent_poor ~ "Transient poor",
+        persistent_poor ~ "Persistent poor",
+        TRUE ~ "Frequently poor"
+      )
+    )
+  
+  groups <- list(
+    "Overall" = profile,
+    "Never poor" = profile %>% filter(poverty_group == "Never poor"),
+    "Transient poor" = profile %>% filter(profile_spell_group == "Transient poor"),
+    "Currently poor (2019)" = profile %>% filter(current_poor),
+    "Persistent poor" = profile %>% filter(persistent_poor)
+  )
+  
+  purrr::imap_dfr(groups, function(data, group_name) {
+    w <- data[[weight]]
+    denom_total <- if (!is.na(denominator_var)) {
+      sum(replace_na(as.numeric(data[[denominator_var]]), 0) * w, na.rm = TRUE)
+    } else if (length(component_vars) > 0) {
+      component_matrix <- as.data.frame(data[component_vars])
+      component_total <- rowSums(dplyr::mutate(component_matrix, across(everything(), ~replace_na(as.numeric(.x), 0))))
+      sum(component_total * w, na.rm = TRUE)
+    } else {
+      NA_real_
+    }
+    
+    purrr::map_dfr(available_components, function(v) {
+      x <- replace_na(as.numeric(data[[v]]), 0)
+      weighted_total <- sum(x * w, na.rm = TRUE)
+      tibble(
+        poverty_profile = group_name,
+        income_variable = v,
+        income_type = unname(income_components[[v]]),
+        unweighted_n = nrow(data),
+        unweighted_positive_n = sum(x > 0, na.rm = TRUE),
+        mean_income = weighted_mean_safe(x, w),
+        weighted_income_total = weighted_total,
+        income_share = if_else(!is.na(denom_total) & denom_total != 0, weighted_total / denom_total, NA_real_)
+      )
+    })
+  }) %>%
+    mutate(
+      income_role = if_else(income_variable == denominator_var, "Total income", "Income component"),
+      income_type = factor(income_type, levels = unname(income_components[available_components])),
+      poverty_profile = factor(
+        poverty_profile,
+        levels = c("Overall", "Never poor", "Transient poor", "Currently poor (2019)", "Persistent poor")
+      )
+    ) %>%
+    arrange(poverty_profile, income_role == "Total income", income_variable)
+}
+
+make_income_category_table <- function(panel, classified, vars, income_categories, reference_year) {
+  id <- vars$person_id
+  year <- vars$year
+  weight <- vars$longitudinal_weight
+  
+  profile <- panel %>%
+    filter(.data[[year]] == reference_year) %>%
+    left_join(
+      classified %>%
+        select(all_of(id), poverty_group, n_poor_4yr, persistent_poor),
+      by = id
+    ) %>%
+    mutate(
+      profile_spell_group = case_when(
+        n_poor_4yr == 0 ~ "Never poor",
+        n_poor_4yr %in% c(1, 2) & !persistent_poor ~ "Transient poor",
+        persistent_poor ~ "Persistent poor",
+        TRUE ~ "Frequently poor"
+      )
+    )
+  
+  for (category in names(income_categories)) {
+    available_vars <- intersect(income_categories[[category]], names(profile))
+    profile[[category]] <- if (length(available_vars) == 0) {
+      0
+    } else {
+      rowSums(as.data.frame(profile[available_vars]) %>%
+                mutate(across(everything(), ~replace_na(as.numeric(.x), 0))))
+    }
+  }
+  
+  category_names <- names(income_categories)
+  profile <- profile %>%
+    mutate(total_categorised_income = rowSums(across(all_of(category_names)), na.rm = TRUE))
+  
+  groups <- list(
+    "Overall" = profile,
+    "Never poor" = profile %>% filter(poverty_group == "Never poor"),
+    "Transient poor" = profile %>% filter(profile_spell_group == "Transient poor"),
+    "Persistent poor" = profile %>% filter(persistent_poor)
+  )
+  
+  purrr::imap_dfr(groups, function(data, group_name) {
+    w <- data[[weight]]
+    denominator <- sum(data$total_categorised_income * w, na.rm = TRUE)
+    
+    purrr::map_dfr(category_names, function(category) {
+      x <- data[[category]]
+      weighted_total <- sum(x * w, na.rm = TRUE)
+      tibble(
+        poverty_profile = group_name,
+        income_category = category,
+        included_variables = paste(intersect(income_categories[[category]], names(panel)), collapse = ", "),
+        unweighted_n = nrow(data),
+        unweighted_positive_n = sum(x > 0, na.rm = TRUE),
+        mean_income = weighted_mean_safe(x, w),
+        weighted_income_total = weighted_total,
+        income_share = if_else(denominator != 0, weighted_total / denominator, NA_real_)
+      )
+    })
+  }) %>%
+    mutate(
+      poverty_profile = factor(
+        poverty_profile,
+        levels = c("Overall", "Never poor", "Transient poor", "Persistent poor")
+      ),
+      income_category = factor(income_category, levels = category_names)
+    ) %>%
+    arrange(income_category, poverty_profile)
 }
 
 theme_thesis <- function(base_size = 11) {
@@ -798,3 +994,6 @@ make_poverty_trend_figure <- function(table1) {
     ) +
     theme_thesis()
 }
+
+
+
