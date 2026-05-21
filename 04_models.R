@@ -53,8 +53,8 @@ project_root <- if (is.na(script_path)) {
   normalizePath(file.path(dirname(script_path), ".."), mustWork = TRUE)
 }
 
-source(file.path(project_root, "R", "00_config.R"))
-source(file.path(project_root, "R", "01_functions.R"))
+source(file.path(project_root,  "00_config.R"))
+source(file.path(project_root,  "01_functions.R"))
 
 project$data_path  <- file.path(project_root, project$data_path)
 project$out_dir    <- file.path(project_root, project$out_dir)
@@ -70,7 +70,7 @@ dir.create(project$model_dir, showWarnings = FALSE, recursive = TRUE)
 # ============================================================================
 
 cat("Reading raw SILC panel data ...\n")
-raw <- read_dta(project$data_path)
+raw <- read_dta('/Users/haticegoktekin/Desktop/phd application/lisans tez/panel_16_19.dta')
 
 cat("Constructing balanced panel ...\n")
 panel_balanced <- construct_balanced_panel(
@@ -105,40 +105,34 @@ model_panel <- panel_poverty %>%
     # informal_status, female, earner_loss are already in the data
 
     # Employment type
-    employment_type = factor(
+    labour_recoded = factor(
       case_when(
         .data[[vars$labour_status]] %in% c(1, 2)          ~ "Employee",
         .data[[vars$labour_status]] %in% c(3, 4)          ~ "Self-employed",
+        .data[[vars$labour_status]] == 5                   ~ "Unemployed",
         .data[[vars$labour_status]] == 7                   ~ "Retired",
-        .data[[vars$labour_status]] %in% c(5, 6, 8, 9, 10) ~ "Inactive",
-        TRUE ~ NA_character_
-      ),
-      levels = c("Employee", "Self-employed", "Retired", "Inactive")
+        .data[[vars$labour_status]] %in% c(6, 8, 9, 10) ~ "Inactive",
+        TRUE ~ NA_character_ ),
+      levels = c("Employee", "Self-employed","Unemployed", "Retired", "Inactive")
     ),
-
     # Education level
-    education_level = factor(
+    education_recoded = factor(
       case_when(
         .data[[vars$education]] %in% c(0, 1, 2) ~ "Primary or below",
         .data[[vars$education]] %in% c(3, 4, 5) ~ "Secondary",
-        .data[[vars$education]] %in% c(6, 7, 8) ~ "Tertiary",
-        TRUE ~ NA_character_
-      ),
-      levels = c("Primary or below", "Secondary", "Tertiary")
-    ),
-
+        .data[[vars$education]] == 6 ~ "Tertiary",
+        TRUE ~ NA_character_),
+      levels = c("Primary or below", "Secondary", "Tertiary")),
     # Age group
     age_group = cut(
       .data[[vars$age]],
       breaks = c(-Inf, 17, 24, 34, 44, 54, 64, Inf),
       labels = c("0-17", "18-24", "25-34", "35-44", "45-54", "55-64", "65+")
-    )
-  ) %>%
+    ) ) %>%
   select(id, year, poverty_status,
-         informal_status, female, earner_loss,
+         informal_status, female, dependency_ratio,
          dependency_ratio_oecd, log_dependency_ratio_oecd,
-         hh_formal_earners, hh_informal_earners,
-         employment_type, education_level, age_group)
+         labour_recoded, education_recoded, age_group)
 
 # ---- Diagnose missing values before dropping --------------------------------
 
@@ -189,14 +183,11 @@ print(table(model_panel$informal_status, dnn = "informal"))
 cat("\nFemale distribution:\n")
 print(table(model_panel$female, dnn = "female"))
 
-cat("\nEarner loss distribution:\n")
-print(table(model_panel$earner_loss, dnn = "earner_loss"))
-
 cat("\nEmployment type:\n")
-print(table(model_panel$employment_type))
+print(table(model_panel$labour_recoded))
 
 cat("\nEducation level:\n")
-print(table(model_panel$education_level))
+print(table(model_panel$education_recoded))
 
 cat("\n--- Summary Statistics by Poverty Status ---\n")
 
@@ -209,13 +200,12 @@ summary_stats <- model_panel %>%
     dep_ratio_oecd_mean = mean(dependency_ratio_oecd, na.rm = TRUE),
     dep_ratio_oecd_sd   = sd(dependency_ratio_oecd, na.rm = TRUE),
     prop_female         = mean(female, na.rm = TRUE),
-    earner_loss_mean    = mean(earner_loss, na.rm = TRUE),
-    hh_formal_earners_mean   = mean(hh_formal_earners, na.rm = TRUE),
-    hh_informal_earners_mean = mean(hh_informal_earners, na.rm = TRUE),
     .groups = "drop"
   ) %>%
-  mutate(poverty_status = ifelse(poverty_status == 1, "Poor", "Non-poor"))
-
+  mutate(
+    poverty_status = ifelse(poverty_status == 1, "Poor", "Non-poor"),
+    dep_ratio_oecd_mean = round(dep_ratio_oecd_mean, 2),
+    dep_ratio_oecd_sd   = round(dep_ratio_oecd_sd, 2) )
 cat("\n")
 print(as.data.frame(summary_stats), row.names = FALSE)
 write_csv(summary_stats, file.path(project$table_dir, "04_summary_stats_by_poverty.csv"))
@@ -232,8 +222,7 @@ cat("Balanced panel:", ifelse(pdim(pdata)$balanced, "Yes", "No"), "\n\n")
 # ---- Build formulas dynamically ----------------------------------------------
 
 # Core time-varying covariates (appear in all models)
-core_vars <- c("informal_status", "dependency_ratio_oecd",
-               "earner_loss", "hh_formal_earners", "hh_informal_earners")
+core_vars <- c("informal_status", "dependency_ratio")
 
 # Factor terms (only include factors with 2+ levels)
 re_factor_terms <- paste0("factor(", usable_factors, ")")
@@ -256,7 +245,7 @@ fe_rhs <- paste(c(core_vars, fe_factor_terms, "factor(year)"), collapse = " + ")
 # ============================================================================
 
 cat("="," MODEL 1: RANDOM EFFECTS ", "=", "\n")
-
+# no gender in the formula 
 re_formula <- as.formula(paste("poverty_status ~", re_rhs))
 cat("RE formula:", deparse(re_formula), "\n")
 
@@ -320,36 +309,55 @@ if (!is.null(fe_ftest)) {
 # ============================================================================
 
 cat("\n=", " MODEL 3: MUNDLAK CORRECTION ", "=", "\n")
+# controlling terms 
+# Try estimation; if singular, progressively drop Mundlak terms
+mundlak_terms <- c("avg_informal", "avg_dep_ratio", "avg_employment")
+
+# Check collinearity before estimating
+cat("\nMundlak term correlations with originals:\n")
+cor_inf <- cor(model_panel_mundlak$informal_status, model_panel_mundlak$avg_informal, use = "complete.obs")
+cor_dep <- cor(model_panel_mundlak$dependency_ratio, model_panel_mundlak$avg_dep_ratio, use = "complete.obs")
+emp_num <- as.numeric(model_panel_mundlak$labour_recoded)
+cor_emp <- cor(emp_num, model_panel_mundlak$avg_employment, use = "complete.obs")
+cat(sprintf("  informal_status vs avg_informal: %.4f\n", cor_inf))
+cat(sprintf("  dependency_ratio vs avg_dep_ratio: %.4f\n", cor_dep))
+cat(sprintf("  employment vs avg_employment: %.4f\n", cor_emp))
+
+# corr coeff : 0.93 ; 0.92 ; 0.94
 
 # Mundlak correction terms: within-person means of time-varying variables
 mundlak_means <- model_panel %>%
-  mutate(employment_numeric = as.numeric(employment_type)) %>%
+  mutate(employment_numeric = as.numeric(labour_recoded)) %>%
   group_by(id) %>%
   summarise(
     avg_informal       = mean(informal_status, na.rm = TRUE),
-    avg_dep_ratio_oecd = mean(dependency_ratio_oecd, na.rm = TRUE),
+    avg_dep_ratio = mean(dependency_ratio, na.rm = TRUE),
     avg_employment     = mean(employment_numeric, na.rm = TRUE),
-    avg_earner_loss    = mean(earner_loss, na.rm = TRUE),
-    avg_formal_earners = mean(hh_formal_earners, na.rm = TRUE),
-    avg_informal_earners = mean(hh_informal_earners, na.rm = TRUE),
-    .groups = "drop"
-  )
+    .groups = "drop")
 
 model_panel_mundlak <- model_panel %>% left_join(mundlak_means, by = "id")
 pdata_mundlak <- pdata.frame(model_panel_mundlak, index = c("id", "year"), drop.index = FALSE)
 
-mundlak_terms <- c("avg_informal", "avg_dep_ratio_oecd", "avg_employment",
-                    "avg_earner_loss", "avg_formal_earners", "avg_informal_earners")
+#mundlak_terms <- c("avg_informal", "avg_dep_ratio", "avg_employment")
 mundlak_rhs <- paste(c(re_rhs, mundlak_terms), collapse = " + ")
 mundlak_formula <- as.formula(paste("poverty_status ~", mundlak_rhs))
 cat("Mundlak formula:", deparse(mundlak_formula), "\n")
 
-model_mundlak <- plm(
-  mundlak_formula,
-  data   = pdata_mundlak,
-  model  = "random",
-  effect = "individual",
-  random.method = "swar"
+model_mundlak <- tryCatch(
+  plm(mundlak_formula, data = pdata_mundlak,
+      model = "random", effect = "individual", random.method = "swar"),
+  error = function(e) {
+    cat("  Swar failed, trying walhus...\n")
+    tryCatch(
+      plm(mundlak_formula, data = pdata_mundlak,
+          model = "random", effect = "individual", random.method = "walhus"),
+      error = function(e2) {
+        cat("  Walhus failed, trying amemiya...\n")
+        plm(mundlak_formula, data = pdata_mundlak,
+            model = "random", effect = "individual", random.method = "amemiya")
+      }
+    )
+  }
 )
 
 mundlak_robust_vcov <- vcovHC(model_mundlak, method = "arellano", type = "HC1")
@@ -380,7 +388,7 @@ cat("\n=", " HAUSMAN TEST ", "=", "\n")
 
 hausman_formula <- as.formula(paste("poverty_status ~", fe_rhs))
 model_re_h <- plm(hausman_formula, data = pdata, model = "random",
-                   effect = "individual", random.method = "swar")
+                   effect = "individual", random.method = "walhus")
 model_fe_h <- plm(hausman_formula, data = pdata, model = "within",
                    effect = "individual")
 
@@ -583,9 +591,7 @@ make_comparison_row <- function(var_name, label) {
 comparison_table <- bind_rows(
   make_comparison_row("informal_status",       "Informal (not registered)"),
   make_comparison_row("dependency_ratio_oecd", "Modified dep. ratio (OECD)"),
-  make_comparison_row("earner_loss",           "Earner loss (t vs t-1)"),
-  make_comparison_row("hh_formal_earners",     "No. formal earners"),
-  make_comparison_row("hh_informal_earners",   "No. informal earners"),
+  make_comparison_row("dependency_ratio", "Modified dep. ratio"),
   make_comparison_row("female",                "Female")
 )
 
@@ -616,18 +622,11 @@ if ("dependency_ratio_oecd" %in% names(re_cf)) {
   re_dep <- re_cf["dependency_ratio_oecd"]
   fe_dep <- fe_cf["dependency_ratio_oecd"]
   cat(sprintf("\nModified dependency ratio:\n  RE: %.1f pp | FE: %.1f pp\n",
-              re_dep * 100, fe_dep * 100))
-}
-
-if ("earner_loss" %in% names(fe_cf)) {
-  cat(sprintf("\nEarner loss:\n  FE: %.1f pp (causal within-person effect)\n",
-              fe_cf["earner_loss"] * 100))
-}
+              re_dep * 100, fe_dep * 100))}
 
 # ============================================================================
 # DIAGNOSTIC SUMMARY
 # ============================================================================
-
 cat("\n--- Diagnostics ---\n")
 cat("Rho (RE):", round(rho_re, 4), "\n")
 cat("R² within (FE):", round(fe_r2_within, 4), "\n")
@@ -640,7 +639,6 @@ cat("Observations — RE:", nobs(model_re), "| FE:", nobs(model_fe),
 # ============================================================================
 # SAVE MODEL OBJECTS
 # ============================================================================
-
 saveRDS(model_re,      file.path(project$model_dir, "04_model_re.rds"))
 saveRDS(model_fe,      file.path(project$model_dir, "04_model_fe.rds"))
 saveRDS(model_mundlak, file.path(project$model_dir, "04_model_mundlak.rds"))
@@ -654,3 +652,4 @@ cat("RE predictions saved.\n")
 cat("\nPanel poverty regression analysis completed.\n")
 cat("Models: ", normalizePath(project$model_dir), "\n")
 cat("Tables: ", normalizePath(project$table_dir), "\n")
+
