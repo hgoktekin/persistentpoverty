@@ -70,7 +70,8 @@ spec <- list(
 )
 
 # X_it  – time-varying covariates of the household head
-x_tv <- c("age_head",          # continuous
+x_tv <- c("age_young",         # 0/1  (age < 30; ref = 30-64)
+           "age_elderly",        # 0/1  (age > 64; ref = 30-64)
            "informal_status",   # 0/1  (social-security registration)
            "labour_recoded")    # factor
 
@@ -105,8 +106,9 @@ df <- df %>%
     wt   = .data[[vars$longitudinal_weight]],
     y    = as.integer(.data[[poor_var]]),
 
-    # X_it
-    age_head = .data[[vars$age]],
+    # X_it  (Andriopoulou 2011: ref = aged 30-64)
+    age_young   = as.integer(.data[[vars$age]] < 30),
+    age_elderly = as.integer(.data[[vars$age]] > 64),
     labour_recoded = factor(
       case_when(
         .data[[vars$labour_status]] %in% 1:2         ~ "Employee",
