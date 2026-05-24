@@ -138,6 +138,39 @@ df <- df %>%
   filter(n_distinct(year) == length(project$panel_years)) %>%
   ungroup()
 
+# ============================================================
+# DIAGNOSTIC: time-varying vs time-invariant classification
+# ============================================================
+# For each candidate variable, compute the share of individuals
+# whose value changes across the panel.  A variable is
+# "time-invariant" if it never (or almost never) changes within
+# person; "time-varying" if it does.
+
+candidate_vars <- c("y", x_tv, h_tv, z_ti)
+
+variation_check <- df %>%
+  group_by(pid) %>%
+  summarise(
+    across(all_of(candidate_vars),
+           ~ n_distinct(.) > 1,
+           .names = "{.col}"),
+    .groups = "drop")
+
+variation_summary <- tibble(
+  variable = candidate_vars,
+  n_individuals     = nrow(variation_check),
+  n_who_change      = sapply(candidate_vars,
+                             function(v) sum(variation_check[[v]])),
+  pct_who_change    = round(100 * n_who_change / n_individuals, 1),
+  classification    = if_else(pct_who_change > 5,
+                              "TIME-VARYING", "TIME-INVARIANT")
+)
+
+cat("\n--- Within-individual variation diagnostic ---\n")
+cat("  (% of individuals whose value changes across 2016-2019)\n\n")
+print(as.data.frame(variation_summary), row.names = FALSE)
+cat("\n")
+
 # -- c) lagged poverty y_{it-1} and initial condition y_{i0} -----------------
 
 df <- df %>%
