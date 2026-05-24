@@ -944,4 +944,19 @@ if (requireNamespace("gt", quietly = TRUE)) {
   cat("gt tables (HTML + LaTeX) saved.\n")
 }
 
+# ---- LaTeX input snippet file ------------------------------------------------
+
+attrition_latex <- c(
+  "% Auto-generated LaTeX snippets for J&VK attrition diagnostics.",
+  "% Requires packages: booktabs, longtable, caption.",
+  "",
+  "\\input{tables/attrition_flow.tex}",
+  "\\input{tables/attrition_baseline_comparison.tex}",
+  "\\input{tables/jvk_representativeness_test.tex}",
+  "\\input{tables/jvk_persistent_poverty_test.tex}",
+  "\\input{tables/jvk_subgroup_representativeness.tex}"
+)
+writeLines(attrition_latex, file.path(project$table_dir, "attrition_latex_inputs.tex"))
+cat("LaTeX input file saved to:", file.path(project$table_dir, "attrition_latex_inputs.tex"), "\n")
+
 cat("\nJenkins & Van Kerm (2017) attrition diagnostics completed.\n")
