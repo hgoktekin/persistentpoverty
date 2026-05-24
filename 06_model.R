@@ -10,7 +10,10 @@
 #   block below.  Everything downstream adjusts automatically.
 # ============================================================
 
-suppressPackageStartupMessages(library(lme4))
+suppressPackageStartupMessages({
+  library(glmmTMB)   # RE probit — more robust than lme4::glmer for
+                     # near-singular designs and survey weights
+})
 
 # --- Project setup -----------------------------------------------------------
 
@@ -66,7 +69,7 @@ spec <- list(
   use_initial  = TRUE,   # Wooldridge initial-condition term y_{i0}
   use_year_fe  = TRUE,   # year dummies
   use_weights  = TRUE,   # longitudinal survey weights (normalised)
-  nAGQ         = 1       # quadrature points (1 = Laplace; increase for accuracy)
+  nAGQ         = 1       # quadrature points (1 = Laplace; >1 not supported by glmmTMB)
 )
 
 # X_it  – time-varying covariates of the household head
@@ -234,24 +237,32 @@ rhs <- c(
 frm <- as.formula(paste("y ~", paste(rhs, collapse = " + "), "+ (1 | pid)"))
 cat("Formula:\n "); cat(deparse(frm, width.cutoff = 300), "\n\n")
 
+# -- collinearity check -------------------------------------------------------
+X_check <- model.matrix(update(frm, . ~ . - (1 | pid)), data = est)
+qr_rank <- qr(X_check)$rank
+if (qr_rank < ncol(X_check)) {
+  cat(sprintf("  WARNING: design matrix rank = %d but has %d columns.\n",
+              qr_rank, ncol(X_check)))
+  cat("  Near-collinear terms may cause estimation problems.\n")
+  cat("  Consider dropping redundant Mundlak means or covariates.\n\n")
+}
+
 # ============================================================
 # ESTIMATION
 # ============================================================
-# Random-effects probit via adaptive Gauss-Hermite quadrature.
+# Random-effects probit via glmmTMB (Laplace approximation).
 # Survey weights are normalised to mean 1 and passed as prior
 # weights; this gives consistent point estimates but standard
 # errors may be conservative.  For strict design-based inference
 # consider bootstrap or pseudo-likelihood alternatives.
 
 cat("Estimating dynamic CRE probit ...\n")
-fit <- glmer(
+fit <- glmmTMB(
   frm,
   data    = est,
   family  = binomial(link = "probit"),
   weights = if (spec$use_weights) est$wt,
-  nAGQ    = spec$nAGQ,
-  control = glmerControl(optimizer = "bobyqa",
-                         optCtrl   = list(maxfun = 2e5))
+  REML    = FALSE
 )
 
 cat("\n"); print(summary(fit))
@@ -260,8 +271,8 @@ cat("\n"); print(summary(fit))
 # COEFFICIENT TABLE & AVERAGE PARTIAL EFFECTS
 # ============================================================
 
-fe <- fixef(fit)
-se <- sqrt(diag(vcov(fit)))
+fe <- fixef(fit)$cond
+se <- sqrt(diag(vcov(fit)$cond))
 z  <- fe / se
 p  <- 2 * pnorm(abs(z), lower.tail = FALSE)
 
@@ -285,7 +296,7 @@ print(coef_tbl, n = Inf)
 
 # Variance components
 vc      <- as.data.frame(VarCorr(fit))
-sigma_a <- vc$sdcor[vc$grp == "pid"]
+sigma_a <- vc$sdcor[vc$grp == "pid" & vc$component == "cond"]
 rho     <- sigma_a^2 / (sigma_a^2 + 1)
 cat(sprintf("\nsigma_a = %.4f,  rho = sigma_a^2/(sigma_a^2+1) = %.4f\n",
             sigma_a, rho))
