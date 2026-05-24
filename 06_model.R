@@ -218,6 +218,31 @@ est <- df %>%
 if (spec$use_weights)
   est <- est %>% mutate(wt = wt / mean(wt))
 
+# -- f) scale continuous covariates for numerical stability --------------------
+# Keeps binary / factor columns untouched; only centres & scales numeric
+# variables with SD > 0.  Scaling improves optimizer conditioning and avoids
+# false-convergence warnings.
+
+continuous_vars <- c("hh_size", "dependency_ratio_oecd", "other_earners")
+scale_info <- list()  # store centres & scales if you need to back-transform
+for (v in continuous_vars) {
+  if (v %in% names(est) && is.numeric(est[[v]])) {
+    mu <- mean(est[[v]], na.rm = TRUE)
+    sd <- sd(est[[v]], na.rm = TRUE)
+    if (sd > 0) {
+      est[[v]] <- (est[[v]] - mu) / sd
+      scale_info[[v]] <- list(center = mu, scale = sd)
+      # also scale the corresponding Mundlak mean (same transformation)
+      m_v <- paste0("m_", v)
+      if (m_v %in% names(est))
+        est[[m_v]] <- (est[[m_v]] - mu) / sd
+    }
+  }
+}
+if (length(scale_info) > 0)
+  cat(sprintf("  Scaled %d continuous covariate(s): %s\n",
+              length(scale_info), paste(names(scale_info), collapse = ", ")))
+
 cat(sprintf("  Sample: %d obs, %d individuals, T = %s\n",
             nrow(est), n_distinct(est$pid),
             paste(sort(unique(est$year)), collapse = ", ")))
@@ -262,7 +287,12 @@ fit <- glmmTMB(
   data    = est,
   family  = binomial(link = "probit"),
   weights = if (spec$use_weights) est$wt,
-  REML    = FALSE
+  REML    = FALSE,
+  control = glmmTMBControl(
+    optimizer = optim,
+    optArgs   = list(method = "BFGS"),
+    optCtrl   = list(maxit = 1e4)
+  )
 )
 
 cat("\n"); print(summary(fit))
