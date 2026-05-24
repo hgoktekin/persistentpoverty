@@ -268,7 +268,46 @@ if ("y_lag" %in% names(fe))
 write_csv(coef_tbl, file.path(project$table_dir, "06_cre_probit_coefficients.csv"))
 saveRDS(fit,        file.path(project$model_dir, "06_cre_probit.rds"))
 
+# --- LaTeX table -------------------------------------------------------------
+
+tex_lines <- c(
+  "\\begin{table}[htbp]",
+  "\\centering",
+  "\\caption{Dynamic Correlated Random-Effects Probit (Wooldridge 2005)}",
+  "\\label{tab:cre-probit}",
+  sprintf("\\begin{tabular}{l%s}", paste(rep("r", 4), collapse = "")),
+  "\\hline\\hline",
+  "& Estimate & Std.~Error & APE & \\\\",
+  "\\hline"
+)
+
+for (i in seq_len(nrow(coef_tbl))) {
+  row <- coef_tbl[i, ]
+  lab <- gsub("_", "\\\\_", row$term)
+  tex_lines <- c(tex_lines, sprintf(
+    "%s & %.4f%s & (%.4f) & %.4f \\\\",
+    lab, row$estimate, row$stars, row$std_error, row$ape))
+}
+
+tex_lines <- c(tex_lines,
+  "\\hline",
+  sprintf("$\\sigma_a$ & \\multicolumn{3}{l}{%.4f} \\\\", sigma_a),
+  sprintf("$\\rho$ & \\multicolumn{3}{l}{%.4f} \\\\", rho),
+  sprintf("Observations & \\multicolumn{3}{l}{%s} \\\\",
+          formatC(nrow(est), format = "d", big.mark = ",")),
+  sprintf("Individuals & \\multicolumn{3}{l}{%s} \\\\",
+          formatC(n_distinct(est$pid), format = "d", big.mark = ",")),
+  "\\hline\\hline",
+  "\\multicolumn{4}{l}{\\footnotesize *** p<0.01, ** p<0.05, * p<0.10.} \\\\",
+  "\\multicolumn{4}{l}{\\footnotesize Cluster-robust SE at individual level.} \\\\",
+  "\\end{tabular}",
+  "\\end{table}"
+)
+
+writeLines(tex_lines, file.path(project$table_dir, "06_cre_probit.tex"))
+
 cat("\nOutputs:\n",
     " ", file.path(project$table_dir, "06_cre_probit_coefficients.csv"), "\n",
+    " ", file.path(project$table_dir, "06_cre_probit.tex"), "\n",
     " ", file.path(project$model_dir, "06_cre_probit.rds"), "\n",
     "\nDone.\n")
