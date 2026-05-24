@@ -3,16 +3,18 @@
 #
 # Sources 00_config.R (paths, variable map) and 01_functions.R
 # (data-pipeline helpers).  Builds the balanced analysis panel
-# using the same pipeline as 02, then estimates a dynamic
-# correlated random-effects probit.
+# using the same pipeline as 02, then estimates three
+# progressively augmented dynamic random-effects probit models:
 #
-# ★ To test a different specification, edit the SPECIFICATION
-#   block below.  Everything downstream adjusts automatically.
+#   Model 1 – base:  y_lag + y_init + X_it + H_it + Z_i
+#   Model 2 – CRE:   + Mundlak means
+#   Model 3 – full:  + wave dummies
+#
+# ★ To change the specification, edit the SPECIFICATION block.
 # ============================================================
 
 suppressPackageStartupMessages({
-  library(glmmTMB)   # RE probit — more robust than lme4::glmer for
-                     # near-singular designs and survey weights
+  library(glmmTMB)
 })
 
 # --- Project setup -----------------------------------------------------------
@@ -65,11 +67,7 @@ panel_poverty <- add_poverty_status(panel_income, poverty_lines, vars,
 spec <- list(
   threshold    = 60,     # poverty line (50, 60, or 70)
   heads_only   = TRUE,   # restrict sample to household reference persons
-  use_mundlak  = TRUE,   # Mundlak (CRE) means of time-varying regressors
-  use_initial  = TRUE,   # Wooldridge initial-condition term y_{i0}
-  use_year_fe  = TRUE,   # year dummies
-  use_weights  = TRUE,   # longitudinal survey weights (normalised)
-  nAGQ         = 1       # quadrature points (1 = Laplace; >1 not supported by glmmTMB)
+  use_weights  = TRUE    # longitudinal survey weights (normalised)
 )
 
 # X_it  – time-varying covariates of the household head
@@ -81,7 +79,8 @@ x_tv <- c("age_young",         # 0/1  (age < 30; ref = 30-64)
 # H_it  – time-varying household-level covariates
 h_tv <- c("hh_size",                # integer
            "dependency_ratio_oecd",  # continuous (OECD-weighted)
-           "other_earners")          # integer (earners excl. head)
+           "other_earners",          # integer (earners excl. head)
+           "has_child_u14")          # 0/1  (any child < 14 in HH)
 
 # Z_i   – time-invariant covariates
 z_ti <- c("female",              # 0/1
@@ -123,7 +122,8 @@ df <- df %>%
                  "Retired", "Inactive")),
 
     # H_it
-    other_earners = pmax(hh_earners_proxy - is_earner_proxy, 0L),
+    other_earners  = pmax(hh_earners_proxy - is_earner_proxy, 0L),
+    has_child_u14  = as.integer(hh_n_children_u14 > 0),
 
     # Z_i
     education_recoded = factor(
@@ -146,10 +146,6 @@ df <- df %>%
 # ============================================================
 # DIAGNOSTIC: time-varying vs time-invariant classification
 # ============================================================
-# For each candidate variable, compute the share of individuals
-# whose value changes across the panel.  A variable is
-# "time-invariant" if it never (or almost never) changes within
-# person; "time-varying" if it does.
 
 candidate_vars <- intersect(c("y", x_tv, h_tv, z_ti), names(df))
 
@@ -192,22 +188,19 @@ df <- left_join(df, y0, by = "pid")
 # -- d) Mundlak means (computed over the full 2016-2019 window) --------------
 #    Factors are expanded to K-1 treatment-contrast dummies before averaging.
 
-mundlak_names <- character(0)
-if (spec$use_mundlak) {
-  tv_all  <- c(x_tv, h_tv)
-  tv_mat  <- model.matrix(reformulate(tv_all), data = df)[, -1, drop = FALSE]
-  colnames(tv_mat) <- make.names(colnames(tv_mat), unique = TRUE)
+tv_all  <- c(x_tv, h_tv)
+tv_mat  <- model.matrix(reformulate(tv_all), data = df)[, -1, drop = FALSE]
+colnames(tv_mat) <- make.names(colnames(tv_mat), unique = TRUE)
 
-  mundlak_df <- as_tibble(tv_mat) %>%
-    mutate(pid = df$pid) %>%
-    group_by(pid) %>%
-    summarise(across(everything(), \(x) mean(x, na.rm = TRUE)),
-              .groups = "drop") %>%
-    rename_with(\(nm) paste0("m_", nm), .cols = -pid)
+mundlak_df <- as_tibble(tv_mat) %>%
+  mutate(pid = df$pid) %>%
+  group_by(pid) %>%
+  summarise(across(everything(), \(x) mean(x, na.rm = TRUE)),
+            .groups = "drop") %>%
+  rename_with(\(nm) paste0("m_", nm), .cols = -pid)
 
-  df <- left_join(df, mundlak_df, by = "pid")
-  mundlak_names <- setdiff(names(mundlak_df), "pid")
-}
+df <- left_join(df, mundlak_df, by = "pid")
+mundlak_names <- setdiff(names(mundlak_df), "pid")
 
 # -- e) estimation sample: 2017-2019 (drop initial period) -------------------
 
@@ -223,137 +216,178 @@ cat(sprintf("  Sample: %d obs, %d individuals, T = %s\n",
             paste(sort(unique(est$year)), collapse = ", ")))
 
 # ============================================================
-# BUILD FORMULA
+# ESTIMATION  –  three progressive specifications
 # ============================================================
+# Model 1 (base):  y_lag + y_init + X + H + Z
+# Model 2 (CRE):   + Mundlak means
+# Model 3 (full):  + wave dummies
 
-rhs <- c(
-  "y_lag",                                      # state dependence (rho)
-  x_tv, h_tv,                                   # X_it, H_it
-  z_ti,                                          # Z_i
-  if (spec$use_initial) "y_init",                # initial condition
-  if (spec$use_mundlak) mundlak_names,           # Mundlak means
-  if (spec$use_year_fe) "factor(year)"           # year dummies
+base_rhs <- c("y_lag", "y_init", x_tv, h_tv, z_ti)
+
+model_specs <- list(
+  list(name = "Model 1 (base)",
+       rhs  = base_rhs),
+  list(name = "Model 2 (+Mundlak)",
+       rhs  = c(base_rhs, mundlak_names)),
+  list(name = "Model 3 (+wave FE)",
+       rhs  = c(base_rhs, mundlak_names, "factor(year)"))
 )
-frm <- as.formula(paste("y ~", paste(rhs, collapse = " + "), "+ (1 | pid)"))
-cat("Formula:\n "); cat(deparse(frm, width.cutoff = 300), "\n\n")
 
-# -- collinearity check -------------------------------------------------------
-X_check <- model.matrix(update(frm, . ~ . - (1 | pid)), data = est)
-qr_rank <- qr(X_check)$rank
-if (qr_rank < ncol(X_check)) {
-  cat(sprintf("  WARNING: design matrix rank = %d but has %d columns.\n",
-              qr_rank, ncol(X_check)))
-  cat("  Near-collinear terms may cause estimation problems.\n")
-  cat("  Consider dropping redundant Mundlak means or covariates.\n\n")
+fits      <- list()
+coef_tbls <- list()
+
+for (m in seq_along(model_specs)) {
+  sp  <- model_specs[[m]]
+  frm <- as.formula(paste("y ~", paste(sp$rhs, collapse = " + "),
+                          "+ (1 | pid)"))
+
+  cat(sprintf("\n========== %s ==========\n", sp$name))
+  cat("Formula:\n "); cat(deparse(frm, width.cutoff = 300), "\n\n")
+
+  # collinearity check
+  X_check <- model.matrix(update(frm, . ~ . - (1 | pid)), data = est)
+  qr_rank <- qr(X_check)$rank
+  if (qr_rank < ncol(X_check))
+    cat(sprintf("  WARNING: rank = %d < %d columns (near-collinearity)\n\n",
+                qr_rank, ncol(X_check)))
+
+  cat("Estimating ...\n")
+  fit <- glmmTMB(
+    frm,
+    data    = est,
+    family  = binomial(link = "probit"),
+    weights = if (spec$use_weights) est$wt,
+    REML    = FALSE,
+    control = glmmTMBControl(
+      optimizer = optim,
+      optArgs   = list(method = "BFGS"),
+      optCtrl   = list(maxit = 1e4)
+    )
+  )
+
+  cat("\n"); print(summary(fit))
+
+  # coefficients and APE
+  fe <- fixef(fit)$cond
+  se <- sqrt(diag(vcov(fit)$cond))
+  z  <- fe / se
+  p  <- 2 * pnorm(abs(z), lower.tail = FALSE)
+
+  Xb      <- predict(fit, type = "link", re.form = NA)
+  avg_phi <- mean(dnorm(Xb))
+
+  coef_tbl <- tibble(
+    term      = names(fe),
+    estimate  = round(fe, 5),
+    std_error = round(se, 5),
+    z_value   = round(z, 3),
+    p_value   = round(p, 4),
+    stars     = add_significance_stars(p),
+    ape       = round(avg_phi * fe, 5)
+  )
+
+  cat("\n--- Coefficients and APEs ---\n")
+  print(coef_tbl, n = Inf)
+
+  # variance components
+  vc      <- as.data.frame(VarCorr(fit))
+  sigma_a <- vc$sdcor[vc$grp == "pid" & vc$component == "cond"]
+  rho_re  <- sigma_a^2 / (sigma_a^2 + 1)
+  cat(sprintf("\nsigma_a = %.4f,  rho = %.4f\n", sigma_a, rho_re))
+
+  fits[[m]]      <- fit
+  coef_tbls[[m]] <- coef_tbl %>%
+    mutate(sigma_a = sigma_a, rho_re = rho_re,
+           n_obs = nrow(est), n_pid = n_distinct(est$pid))
 }
-
-# ============================================================
-# ESTIMATION
-# ============================================================
-# Random-effects probit via glmmTMB (Laplace approximation).
-# Survey weights are normalised to mean 1 and passed as prior
-# weights; this gives consistent point estimates but standard
-# errors may be conservative.  For strict design-based inference
-# consider bootstrap or pseudo-likelihood alternatives.
-
-cat("Estimating dynamic CRE probit ...\n")
-fit <- glmmTMB(
-  frm,
-  data    = est,
-  family  = binomial(link = "probit"),
-  weights = if (spec$use_weights) est$wt,
-  REML    = FALSE
-)
-
-cat("\n"); print(summary(fit))
-
-# ============================================================
-# COEFFICIENT TABLE & AVERAGE PARTIAL EFFECTS
-# ============================================================
-
-fe <- fixef(fit)$cond
-se <- sqrt(diag(vcov(fit)$cond))
-z  <- fe / se
-p  <- 2 * pnorm(abs(z), lower.tail = FALSE)
-
-coef_tbl <- tibble(
-  term      = names(fe),
-  estimate  = round(fe, 5),
-  std_error = round(se, 5),
-  z_value   = round(z, 3),
-  p_value   = round(p, 4),
-  stars     = add_significance_stars(p)
-)
-
-# APE = mean[phi(X*beta)] * beta  (continuous / binary regressors)
-Xb      <- predict(fit, type = "link", re.form = NA)
-avg_phi <- mean(dnorm(Xb))
-coef_tbl <- coef_tbl %>%
-  mutate(ape = round(avg_phi * estimate, 5))
-
-cat("\n--- Coefficients and average partial effects ---\n")
-print(coef_tbl, n = Inf)
-
-# Variance components
-vc      <- as.data.frame(VarCorr(fit))
-sigma_a <- vc$sdcor[vc$grp == "pid" & vc$component == "cond"]
-rho     <- sigma_a^2 / (sigma_a^2 + 1)
-cat(sprintf("\nsigma_a = %.4f,  rho = sigma_a^2/(sigma_a^2+1) = %.4f\n",
-            sigma_a, rho))
-
-if ("y_lag" %in% names(fe))
-  cat(sprintf("State dependence: rho_hat = %.4f  (p %s)\n",
-              fe["y_lag"],
-              ifelse(p["y_lag"] < 0.001, "< 0.001",
-                     sprintf("= %.4f", p["y_lag"]))))
 
 # ============================================================
 # SAVE
 # ============================================================
 
-write_csv(coef_tbl, file.path(project$table_dir, "06_cre_probit_coefficients.csv"))
-saveRDS(fit,        file.path(project$model_dir, "06_cre_probit.rds"))
+# --- CSV (one per model) -----------------------------------------------------
+for (m in seq_along(model_specs)) {
+  fname <- sprintf("06_cre_probit_m%d_coefficients.csv", m)
+  write_csv(coef_tbls[[m]], file.path(project$table_dir, fname))
+}
+for (m in seq_along(fits)) {
+  fname <- sprintf("06_cre_probit_m%d.rds", m)
+  saveRDS(fits[[m]], file.path(project$model_dir, fname))
+}
 
-# --- LaTeX table -------------------------------------------------------------
+# --- LaTeX table (all 3 models side by side) ---------------------------------
+
+# collect all unique terms across models, in the order they first appear
+all_terms <- unique(unlist(lapply(coef_tbls, \(ct) ct$term)))
 
 tex_lines <- c(
   "\\begin{table}[htbp]",
   "\\centering",
-  "\\caption{Dynamic Correlated Random-Effects Probit (Wooldridge 2005)}",
+  "\\caption{Dynamic Random-Effects Probit: Progressive Specifications}",
   "\\label{tab:cre-probit}",
-  sprintf("\\begin{tabular}{l%s}", paste(rep("r", 4), collapse = "")),
+  "\\begin{tabular}{lccc}",
   "\\hline\\hline",
-  "& Estimate & Std.~Error & APE & \\\\",
+  "& Model 1 & Model 2 & Model 3 \\\\",
+  "& (Base) & (+Mundlak) & (+Wave FE) \\\\",
   "\\hline"
 )
 
-for (i in seq_len(nrow(coef_tbl))) {
-  row <- coef_tbl[i, ]
-  lab <- gsub("_", "\\\\_", row$term)
-  tex_lines <- c(tex_lines, sprintf(
-    "%s & %.4f%s & (%.4f) & %.4f \\\\",
-    lab, row$estimate, row$stars, row$std_error, row$ape))
+for (trm in all_terms) {
+  lab <- gsub("_", "\\\\_", trm)
+  cells <- character(3)
+  se_cells <- character(3)
+  for (m in 1:3) {
+    ct  <- coef_tbls[[m]]
+    row <- ct[ct$term == trm, ]
+    if (nrow(row) == 1) {
+      cells[m]    <- sprintf("%.4f%s", row$estimate, row$stars)
+      se_cells[m] <- sprintf("(%.4f)", row$std_error)
+    } else {
+      cells[m]    <- ""
+      se_cells[m] <- ""
+    }
+  }
+  tex_lines <- c(tex_lines,
+    sprintf("%s & %s & %s & %s \\\\", lab, cells[1], cells[2], cells[3]),
+    sprintf(" & %s & %s & %s \\\\", se_cells[1], se_cells[2], se_cells[3])
+  )
 }
+
+# footer: sigma_a, rho, N
+sa <- sapply(coef_tbls, \(ct) ct$sigma_a[1])
+rr <- sapply(coef_tbls, \(ct) ct$rho_re[1])
+nn <- sapply(coef_tbls, \(ct) ct$n_obs[1])
+np <- sapply(coef_tbls, \(ct) ct$n_pid[1])
 
 tex_lines <- c(tex_lines,
   "\\hline",
-  sprintf("$\\sigma_a$ & \\multicolumn{3}{l}{%.4f} \\\\", sigma_a),
-  sprintf("$\\rho$ & \\multicolumn{3}{l}{%.4f} \\\\", rho),
-  sprintf("Observations & \\multicolumn{3}{l}{%s} \\\\",
-          formatC(nrow(est), format = "d", big.mark = ",")),
-  sprintf("Individuals & \\multicolumn{3}{l}{%s} \\\\",
-          formatC(n_distinct(est$pid), format = "d", big.mark = ",")),
+  sprintf("$\\sigma_a$ & %.4f & %.4f & %.4f \\\\", sa[1], sa[2], sa[3]),
+  sprintf("$\\rho$ & %.4f & %.4f & %.4f \\\\", rr[1], rr[2], rr[3]),
+  sprintf("Observations & %s & %s & %s \\\\",
+          formatC(nn[1], big.mark = ","),
+          formatC(nn[2], big.mark = ","),
+          formatC(nn[3], big.mark = ",")),
+  sprintf("Individuals & %s & %s & %s \\\\",
+          formatC(np[1], big.mark = ","),
+          formatC(np[2], big.mark = ","),
+          formatC(np[3], big.mark = ",")),
+  "Mundlak means & No & Yes & Yes \\\\",
+  "Wave dummies & No & No & Yes \\\\",
   "\\hline\\hline",
-  "\\multicolumn{4}{l}{\\footnotesize *** p<0.01, ** p<0.05, * p<0.10.} \\\\",
-  "\\multicolumn{4}{l}{\\footnotesize Cluster-robust SE at individual level.} \\\\",
+  "\\multicolumn{4}{l}{\\footnotesize *** p$<$0.01, ** p$<$0.05, * p$<$0.10.} \\\\",
+  "\\multicolumn{4}{l}{\\footnotesize Standard errors in parentheses.} \\\\",
   "\\end{tabular}",
   "\\end{table}"
 )
 
 writeLines(tex_lines, file.path(project$table_dir, "06_cre_probit.tex"))
 
-cat("\nOutputs:\n",
-    " ", file.path(project$table_dir, "06_cre_probit_coefficients.csv"), "\n",
-    " ", file.path(project$table_dir, "06_cre_probit.tex"), "\n",
-    " ", file.path(project$model_dir, "06_cre_probit.rds"), "\n",
-    "\nDone.\n")
+cat("\nOutputs:\n")
+for (m in 1:3) {
+  cat(sprintf("  %s\n", file.path(project$table_dir,
+              sprintf("06_cre_probit_m%d_coefficients.csv", m))))
+  cat(sprintf("  %s\n", file.path(project$model_dir,
+              sprintf("06_cre_probit_m%d.rds", m))))
+}
+cat(sprintf("  %s\n", file.path(project$table_dir, "06_cre_probit.tex")))
+cat("\nDone.\n")
