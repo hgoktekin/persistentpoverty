@@ -148,7 +148,7 @@ df <- df %>%
 # "time-invariant" if it never (or almost never) changes within
 # person; "time-varying" if it does.
 
-candidate_vars <- c("y", x_tv, h_tv, z_ti)
+candidate_vars <- intersect(c("y", x_tv, h_tv, z_ti), names(df))
 
 variation_check <- df %>%
   group_by(pid) %>%
