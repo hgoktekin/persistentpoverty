@@ -123,7 +123,7 @@ df <- df %>%
 
     # H_it
     other_earners  = pmax(hh_earners_proxy - is_earner_proxy, 0L),
-    has_child_u14  = as.integer(hh_n_children_u14 > 0),
+    has_child_u14  = as.integer(hh_children_u14 > 0),
 
     # Z_i
     education_recoded = factor(
