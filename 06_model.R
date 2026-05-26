@@ -119,7 +119,7 @@ df <- df %>%
         .data[[vars$labour_status]] == 7             ~ "Retired",
         .data[[vars$labour_status]] %in% c(6, 8:10) ~ "Inactive"),
       levels = c("Employee", "Self-employed", "Unemployed",
-                 "Retired", "Inactive")),
+                 "Retired", "Inactive")),  # ref = Employee
 
     # H_it
     other_earners  = pmax(hh_earners_proxy - is_earner_proxy, 0L),
@@ -131,7 +131,7 @@ df <- df %>%
         .data[[vars$education]] %in% 0:2 ~ "Primary or below",
         .data[[vars$education]] %in% 3:5 ~ "Secondary",
         .data[[vars$education]] == 6     ~ "Tertiary"),
-      levels = c("Primary or below", "Secondary", "Tertiary"))
+      levels = c("Secondary", "Primary or below", "Tertiary"))  # ref = Secondary
   )
 
 # -- b) keep only individuals with complete data in every year ----------------
@@ -186,14 +186,32 @@ y0 <- df %>%
 df <- left_join(df, y0, by = "pid")
 
 # -- d) Mundlak means (computed over the full 2016-2019 window) --------------
-#    Factors are expanded to K-1 treatment-contrast dummies before averaging.
+#    Factors are expanded to K-1 dummies; numeric variables averaged directly.
 
-tv_all  <- c(x_tv, h_tv)
-tv_mat  <- model.matrix(reformulate(tv_all), data = df)[, -1, drop = FALSE]
-colnames(tv_mat) <- make.names(colnames(tv_mat), unique = TRUE)
+tv_all <- c(x_tv, h_tv)
 
-mundlak_df <- as_tibble(tv_mat) %>%
-  mutate(pid = df$pid) %>%
+# Expand factors to dummies, keep numeric as-is
+expand_to_numeric <- function(data, varnames) {
+  pieces <- list()
+  for (v in varnames) {
+    if (is.factor(data[[v]])) {
+      lvls <- levels(data[[v]])
+      for (k in seq_along(lvls)[-1]) {        # skip reference level
+        col_name <- paste0(v, lvls[k])
+        col_name <- make.names(col_name)
+        pieces[[col_name]] <- as.integer(data[[v]] == lvls[k])
+      }
+    } else {
+      pieces[[v]] <- data[[v]]
+    }
+  }
+  as_tibble(pieces)
+}
+
+tv_expanded <- expand_to_numeric(df, tv_all)
+tv_expanded$pid <- df$pid
+
+mundlak_df <- tv_expanded %>%
   group_by(pid) %>%
   summarise(across(everything(), \(x) mean(x, na.rm = TRUE)),
             .groups = "drop") %>%
@@ -201,6 +219,7 @@ mundlak_df <- as_tibble(tv_mat) %>%
 
 df <- left_join(df, mundlak_df, by = "pid")
 mundlak_names <- setdiff(names(mundlak_df), "pid")
+cat(sprintf("  Mundlak means: %d terms\n", length(mundlak_names)))
 
 # -- e) estimation sample: 2017-2019 (drop initial period) -------------------
 
