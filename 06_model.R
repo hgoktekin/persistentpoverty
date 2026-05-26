@@ -290,8 +290,7 @@ for (m in seq_along(model_specs)) {
   print(coef_tbl, n = Inf)
 
   # variance components
-  vc      <- as.data.frame(VarCorr(fit))
-  sigma_a <- vc$sdcor[vc$grp == "pid" & vc$component == "cond"]
+  sigma_a <- sqrt(VarCorr(fit)$cond$pid[1, 1])
   rho_re  <- sigma_a^2 / (sigma_a^2 + 1)
   cat(sprintf("\nsigma_a = %.4f,  rho = %.4f\n", sigma_a, rho_re))
 
